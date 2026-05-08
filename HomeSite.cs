@@ -12,13 +12,5 @@ public class HomeSite : Building
     {
         buildingName = "Home Site";
         base.Start();
-        Debug.Log("[HomeSite] Ready.");
-    }
-
-    // Example hook: override Select() to add HomeSite-specific UI or sounds
-    public override void Select()
-    {
-        base.Select();
-        // e.g., play a selection sound, highlight the building, etc.
     }
 }

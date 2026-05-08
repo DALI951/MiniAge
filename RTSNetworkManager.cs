@@ -35,22 +35,6 @@ public class RTSNetworkManager : NetworkManager
         LobbyUI.Instance?.ShowLobby();
     }
 
-    private IEnumerator ShowIPAfterDelay()
-    {
-        // Wait a few frames so Mirror finishes initializing
-        yield return null;
-        yield return null;
-        string ip = GetLocalIP();
-        Debug.Log($"[Network] Hosting on IP: {ip}");
-        // Retry for up to 2 seconds in case MainMenuUI isn't ready
-        for (int i = 0; i < 10; i++)
-        {
-            if (MainMenuUI.Instance != null)
-            { MainMenuUI.Instance.OnHostStarted(ip); yield break; }
-            yield return new WaitForSeconds(0.2f);
-        }
-    }
-
     public override void OnStartClient()
     {
         base.OnStartClient();
@@ -127,12 +111,6 @@ public class RTSNetworkManager : NetworkManager
         // Auto-start if everyone is ready and minimum 2 players
         if (totalCount >= requiredPlayers && readyCount == totalCount)
             StartMatch();
-    }
-
-
-    private void OnRpcRefreshLobby()
-    {
-        LobbyUI.Instance?.RefreshPlayerList();
     }
 
     [Server]

@@ -2,30 +2,22 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.EventSystems;
+using UnityEngine.UI;
 
 /// <summary>
 /// SelectionManager — right-click move/gather, ground deselect, shift-click, double-click.
-///
-/// Feature 1: Group movement by unit type.
-///   When multiple unit types are selected and right-clicked:
-///   - All Infantry form one cluster
-///   - All Cavalry form another cluster offset to the side
-///   - All Villagers form another cluster
-///   Each type moves at its own fastest speed internally but the
-///   formation keeps them separated cleanly.
 /// </summary>
 public class SelectionManager : MonoBehaviour
 {
     public static SelectionManager Instance { get; private set; }
-    private List<Vector3> waypoints = new List<Vector3>();
 
     [Header("Layers")]
     [SerializeField] private LayerMask resourceLayer;
     [SerializeField] private LayerMask groundLayer;
 
     [Header("Group Move")]
-    [SerializeField] private float groupSpacing    = 2.2f;   // within a type cluster
-    [SerializeField] private float typeGroupOffset = 6f;     // between type clusters
+    [SerializeField] private float groupSpacing    = 2.2f;
+    [SerializeField] private float typeGroupOffset = 6f;
 
     private List<Unit> selectedUnits    = new List<Unit>();
     private Building   selectedBuilding = null;
@@ -38,7 +30,11 @@ public class SelectionManager : MonoBehaviour
 
     private void Update()
     {
-        if (EventSystem.current.IsPointerOverGameObject()) return;
+        if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())
+        {
+            // Still allow right-click on minimap even when over UI
+            if (!Input.GetMouseButtonDown(1)) return;
+        }
         HandleGroundDeselect();
         HandleRightClick();
     }
@@ -47,22 +43,26 @@ public class SelectionManager : MonoBehaviour
     private void HandleGroundDeselect()
     {
         if (!Input.GetMouseButtonUp(0)) return;
+        if (UnitSelectionBox.Instance != null && UnitSelectionBox.Instance.JustFinishedDrag) return;
+        if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject()) return;
 
-        // Don't deselect if a drag-select just finished
-        if (UnitSelectionBox.Instance != null && UnitSelectionBox.Instance.JustFinishedDrag)
-            return;
+        Ray ray = Camera.main != null ? Camera.main.ScreenPointToRay(Input.mousePosition) : new Ray();
+        if (Camera.main == null) return;
 
-        Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
-        if (!Physics.Raycast(ray, out RaycastHit hit)) return;
+        bool hitUnit     = false;
+        bool hitBuilding = false;
+        bool hitResource = false;
 
-        bool hitUnit     = hit.collider.GetComponentInParent<Unit>()         != null;
-        bool hitBuilding = hit.collider.GetComponentInParent<Building>()     != null;
-        bool hitResource = hit.collider.GetComponentInParent<ResourceNode>() != null;
+        if (Physics.Raycast(ray, out RaycastHit hit))
+        {
+            hitUnit     = hit.collider.GetComponentInParent<Unit>()         != null;
+            hitBuilding = hit.collider.GetComponentInParent<Building>()     != null;
+            hitResource = hit.collider.GetComponentInParent<ResourceNode>() != null;
+        }
 
         if (!hitUnit && !hitBuilding && !hitResource)
         {
-            bool shift = Input.GetKey(KeyCode.LeftShift) ||
-                        Input.GetKey(KeyCode.RightShift);
+            bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
             if (!shift) { DeselectAll(); CloseAllPanels(); }
         }
     }
@@ -71,114 +71,163 @@ public class SelectionManager : MonoBehaviour
     private void HandleRightClick()
     {
         if (!Input.GetMouseButtonDown(1)) return;
+        if (selectedUnits.Count == 0) return;
+        if (IsPointerOverInteractiveUI()) return;
 
-        bool shift = Input.GetKey(KeyCode.LeftShift) ||
-                    Input.GetKey(KeyCode.RightShift);
+        if (Camera.main == null)
+        {
+            Debug.LogError("[SelectionManager] Camera.main is NULL!");
+            return;
+        }
 
         Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
 
-        // Hit an enemy unit? → attack it
-        if (selectedUnits.Count > 0 &&
-            Physics.Raycast(ray, out RaycastHit unitHit, Mathf.Infinity))
+        // ── Enemy unit? → attack ──────────────────────────────────────
+        if (Physics.Raycast(ray, out RaycastHit unitHit, Mathf.Infinity))
         {
             Unit target = unitHit.collider.GetComponentInParent<Unit>();
             if (target != null && !selectedUnits.Contains(target))
             {
+                bool issued = false;
                 foreach (Unit u in selectedUnits)
                 {
-                    if (u is Villager) continue; // villagers don't attack on command
+                    if (u is Villager) continue;
+                    if (!u.IsEnemy(target)) continue;
                     u.SetAttackTarget(target);
+                    u.SetHuntTarget(target.UnitName);
+                    issued = true;
                 }
-                // Clear movement flags when attacking
-                MoveFlag.Instance?.ClearAllFlags();
-                return;
+                if (issued)
+                {
+                    MoveFlag.Instance?.ClearAllFlags();
+                    foreach (Unit u in selectedUnits)
+                        if (u != null) u.ClearWaypoints();
+                    return;
+                }
             }
         }
 
-        // Resource node
-        if (selectedUnits.Count > 0 &&
-            Physics.Raycast(ray, out RaycastHit resHit, Mathf.Infinity, resourceLayer))
+        // ── Enemy building? → attack ──────────────────────────────────
+        if (Physics.Raycast(ray, out RaycastHit bldHit, Mathf.Infinity))
+        {
+            Building bldTarget = bldHit.collider.GetComponentInParent<Building>();
+            if (bldTarget != null && bldTarget.OwnerPlayerId != PlayerColorManager.LocalPlayerIndex)
+            {
+                bool issued = false;
+                foreach (Unit u in selectedUnits)
+                {
+                    if (u is Villager) continue;
+                    u.SetBuildingTarget(bldTarget);
+                    issued = true;
+                }
+                if (issued) { MoveFlag.Instance?.ClearAllFlags(); return; }
+            }
+        }
+
+        // ── Resource node? → gather (Villagers) or move (military) ────
+        if (Physics.Raycast(ray, out RaycastHit resHit, Mathf.Infinity, resourceLayer))
         {
             ResourceNode node = resHit.collider.GetComponentInParent<ResourceNode>();
             if (node != null)
             {
-                // Clear movement flags when gathering
                 MoveFlag.Instance?.ClearAllFlags();
+                foreach (Unit u in selectedUnits)
+                    if (u != null) u.ClearWaypoints();
+
                 foreach (Unit u in selectedUnits)
                 {
                     if (u is Villager v) v.GatherFrom(node);
-                    else                 u.MoveTo(node.transform.position);
+                    else                 u.SetFirstWaypoint(node.transform.position);
                 }
                 return;
             }
         }
 
-        // Ground — move in type-based formation
-        if (selectedUnits.Count == 0) return;
-        if (!Physics.Raycast(ray, out RaycastHit groundHit, Mathf.Infinity, groundLayer)) return;
-        
+        // ── Ground → move in formation ────────────────────────────────
+        if (!TryGetGroundPoint(out Vector3 groundPoint)) return;
+
+        bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+
         if (shift)
         {
-            // Add to waypoint queue - show persistent flag
-            waypoints.Add(groundHit.point);
-            MoveFlag.Instance?.ShowFlag(groundHit.point, addToPath: true);
-            // If only one waypoint so far, start moving
-            if (waypoints.Count == 1)
-                StartCoroutine(ProcessWaypoints());
+            AddFormationWaypoints(groundPoint);
+            MoveFlag.Instance?.ShowFlag(groundPoint, true);
         }
-        else   
+        else
         {
-            // Single destination - show flag and move
-            waypoints.Clear();
+            foreach (Unit u in selectedUnits)
+                if (u != null) u.ClearWaypoints();
+
             MoveFlag.Instance?.ClearAllFlags();
-            MoveFlag.Instance?.ShowFlag(groundHit.point, addToPath: false);
-            MoveByType(groundHit.point);
+            MoveFlag.Instance?.ShowFlag(groundPoint, false);
+            AssignFormationWaypoints(groundPoint);
         }
     }
 
-
-
-
-    private System.Collections.IEnumerator ProcessWaypoints()
+    private bool IsPointerOverInteractiveUI()
     {
-        while (waypoints.Count > 0)
+        if (EventSystem.current == null) return false;
+        var pointerData = new PointerEventData(EventSystem.current);
+        pointerData.position = Input.mousePosition;
+        var results = new System.Collections.Generic.List<RaycastResult>();
+        EventSystem.current.RaycastAll(pointerData, results);
+
+        foreach (var r in results)
         {
-            Vector3 next = waypoints[0];
-            MoveByType(next);
-            
-            // Track units for this waypoint
-            MoveFlag.Instance?.StartTrackingUnits(next, selectedUnits);
+            string name = r.gameObject.name.ToLower();
+            if (name.Contains("viewport")) continue;
+            if (name.Contains("rawimage") && !name.Contains("button")) continue;
+            if (name.Contains("panel") && !name.Contains("button")) continue;
 
-            // Wait until units arrive
-            yield return new WaitForSeconds(0.5f);
-            while (true)
-            {
-                bool arrived = true;
-                foreach (Unit u in selectedUnits)
-                {
-                    if (u == null) continue;
-                    var ag = u.GetComponent<UnityEngine.AI.NavMeshAgent>();
-                    if (ag != null && ag.remainingDistance > 1.5f)
-                    { arrived = false; break; }
-                }
-                if (arrived) break;
-                yield return new WaitForSeconds(0.3f);
-            }
-
-            waypoints.RemoveAt(0);
-            MoveFlag.Instance?.ClearFlags();
-
-            // Show remaining waypoint flags
-            foreach (Vector3 wp in waypoints)
-                MoveFlag.Instance?.ShowFlag(wp, addToPath: true);
+            if (r.gameObject.GetComponent<Button>() != null) return true;
+            if (r.gameObject.GetComponent<TMPro.TMP_InputField>() != null) return true;
+            if (r.gameObject.GetComponent<Slider>() != null) return true;
+            if (name.Contains("button")) return true;
         }
+        return false;
     }
 
-
-    // ── Group move sorted by unit type (Feature 1) ────────────────────────
-    private void MoveByType(Vector3 center)
+    private bool TryGetGroundPoint(out Vector3 point)
     {
-        // Group units by their UnitName (Infantry, Cavalry, Villager, etc.)
+        if (Camera.main == null)
+        {
+            point = Vector3.zero;
+            return false;
+        }
+
+        Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+
+        // Try dedicated ground layer first
+        if (groundLayer != 0)
+        {
+            if (Physics.Raycast(ray, out RaycastHit hit, Mathf.Infinity, groundLayer))
+            {
+                point = hit.point;
+                return true;
+            }
+        }
+
+        // Fallback: raycast everything, skip units/buildings/resources
+        RaycastHit[] all = Physics.RaycastAll(ray, Mathf.Infinity);
+        System.Array.Sort(all, (a, b) => a.distance.CompareTo(b.distance));
+
+        foreach (var h in all)
+        {
+            if (h.collider.GetComponentInParent<Unit>() != null) continue;
+            if (h.collider.GetComponentInParent<Building>() != null) continue;
+            if (h.collider.GetComponentInParent<ResourceNode>() != null) continue;
+
+            point = h.point;
+            return true;
+        }
+
+        point = Vector3.zero;
+        return false;
+    }
+
+    // ── Formation movement by unit type ─────────────────────────────────
+    public void AssignFormationWaypoints(Vector3 center)
+    {
         var groups = new Dictionary<string, List<Unit>>();
         foreach (Unit u in selectedUnits)
         {
@@ -188,7 +237,6 @@ public class SelectionManager : MonoBehaviour
             groups[u.UnitName].Add(u);
         }
 
-        // Lay groups side by side, each in its own sub-formation
         int groupIndex = 0;
         int groupCount = groups.Count;
         float totalWidth = (groupCount - 1) * typeGroupOffset;
@@ -196,12 +244,9 @@ public class SelectionManager : MonoBehaviour
         foreach (var kvp in groups)
         {
             List<Unit> group = kvp.Value;
-
-            // Offset this type's centre left/right from the click point
             float xShift = -totalWidth / 2f + groupIndex * typeGroupOffset;
             Vector3 groupCenter = center + new Vector3(xShift, 0, 0);
 
-            // Within the group, move at the group's slowest speed
             float slowest = float.MaxValue;
             foreach (Unit u in group)
                 if (u != null && u.BaseSpeed < slowest) slowest = u.BaseSpeed;
@@ -211,27 +256,27 @@ public class SelectionManager : MonoBehaviour
             {
                 Unit u = group[i];
                 if (u == null) continue;
+
                 int   col  = i % cols;
                 int   row  = i / cols;
                 float xOff = (col - (cols - 1) / 2f) * groupSpacing;
                 float zOff = -row * groupSpacing;
-                u.SetMoveSpeed(slowest);
-                u.MoveTo(groupCenter + new Vector3(xOff, 0, zOff));
-            }
 
+                Vector3 dest = groupCenter + new Vector3(xOff, 0, zOff);
+
+                if (MapBoundary.Instance != null)
+                    dest = MapBoundary.Instance.Clamp(dest);
+
+                if (UnityEngine.AI.NavMesh.SamplePosition(dest, out UnityEngine.AI.NavMeshHit hit, 5f, UnityEngine.AI.NavMesh.AllAreas))
+                    dest = hit.position;
+
+                u.SetMoveSpeed(slowest);
+                u.SetFirstWaypoint(dest);
+            }
             groupIndex++;
         }
 
         StartCoroutine(RestoreSpeedsWhenArrived());
-        bool shift = Input.GetKey(KeyCode.LeftShift) ||
-                    Input.GetKey(KeyCode.RightShift);
-
-        MoveFlag.Instance?.ShowFlag(center, addToPath: shift);
-
-        if (!shift)
-        {
-            MoveFlag.Instance?.StartTrackingUnits(center, selectedUnits);
-        }
     }
 
     private IEnumerator RestoreSpeedsWhenArrived()
@@ -255,9 +300,11 @@ public class SelectionManager : MonoBehaviour
     }
 
     // ── PUBLIC — called by Unit.OnMouseDown ───────────────────────────────
-
     public void SelectSingleUnit(Unit unit)
     {
+        if (unit == null || unit.OwnerPlayerId != PlayerColorManager.LocalPlayerIndex)
+            return;
+
         DeselectAll();
         selectedUnits.Add(unit);
         unit.Select(PlayerColorManager.LocalPlayerColor);
@@ -268,6 +315,9 @@ public class SelectionManager : MonoBehaviour
 
     public void ShiftClickUnit(Unit unit)
     {
+        if (unit == null || unit.OwnerPlayerId != PlayerColorManager.LocalPlayerIndex)
+            return;
+
         if (selectedUnits.Contains(unit))
         { unit.Deselect(); selectedUnits.Remove(unit); }
         else
@@ -275,19 +325,80 @@ public class SelectionManager : MonoBehaviour
         RefreshInfoPanelPublic();
     }
 
+    // ── Shift-queue with formation ──────────────────────────────────────
+    public void AddFormationWaypoints(Vector3 center)
+    {
+        var groups = new Dictionary<string, List<Unit>>();
+        foreach (Unit u in selectedUnits)
+        {
+            if (u == null) continue;
+            if (!groups.ContainsKey(u.UnitName))
+                groups[u.UnitName] = new List<Unit>();
+            groups[u.UnitName].Add(u);
+        }
+
+        int groupIndex = 0;
+        int groupCount = groups.Count;
+        float totalWidth = (groupCount - 1) * typeGroupOffset;
+
+        foreach (var kvp in groups)
+        {
+            List<Unit> group = kvp.Value;
+            float xShift = -totalWidth / 2f + groupIndex * typeGroupOffset;
+            Vector3 groupCenter = center + new Vector3(xShift, 0, 0);
+
+            int cols = Mathf.CeilToInt(Mathf.Sqrt(group.Count));
+            for (int i = 0; i < group.Count; i++)
+            {
+                Unit u = group[i];
+                if (u == null) continue;
+
+                int col = i % cols;
+                int row = i / cols;
+                float xOff = (col - (cols - 1) / 2f) * groupSpacing;
+                float zOff = -row * groupSpacing;
+
+                Vector3 dest = groupCenter + new Vector3(xOff, 0, zOff);
+                if (MapBoundary.Instance != null)
+                    dest = MapBoundary.Instance.Clamp(dest);
+                if (UnityEngine.AI.NavMesh.SamplePosition(dest, out UnityEngine.AI.NavMeshHit hit, 5f, UnityEngine.AI.NavMesh.AllAreas))
+                    dest = hit.position;
+
+                u.AddWaypoint(dest);
+            }
+            groupIndex++;
+        }
+    }
+
     public void SelectAllVisibleOfType(string name)
     {
         DeselectAll();
-        foreach (Unit u in FindObjectsOfType<Unit>())
+        int local = PlayerColorManager.LocalPlayerIndex;
+        var list  = UnitSelectionManager.Instance != null
+            ? UnitSelectionManager.Instance.allUnitsList
+            : null;
+        if (list == null)
         {
-            if (u.UnitName != name) continue;
-            Vector3 sp = Camera.main.WorldToScreenPoint(u.transform.position);
-            if (sp.z < 0 || sp.x < 0 || sp.x > Screen.width ||
-                sp.y < 0 || sp.y > Screen.height) continue;
-            selectedUnits.Add(u);
-            u.Select(PlayerColorManager.LocalPlayerColor);
+            foreach (Unit u in FindObjectsOfType<Unit>())
+                TryAddVisibleOfType(u, name, local);
+        }
+        else
+        {
+            foreach (Unit u in list)
+                TryAddVisibleOfType(u, name, local);
         }
         RefreshInfoPanelPublic();
+    }
+
+    private void TryAddVisibleOfType(Unit u, string name, int localOwner)
+    {
+        if (u == null || u.UnitName != name || u.OwnerPlayerId != localOwner) return;
+        if (Camera.main == null) return;
+        Vector3 sp = Camera.main.WorldToScreenPoint(u.transform.position);
+        if (sp.z < 0 || sp.x < 0 || sp.x > Screen.width ||
+            sp.y < 0 || sp.y > Screen.height) return;
+        selectedUnits.Add(u);
+        u.Select(PlayerColorManager.LocalPlayerColor);
     }
 
     public void SelectBuilding(Building building)
@@ -304,6 +415,7 @@ public class SelectionManager : MonoBehaviour
     public void AddUnitToSelection(Unit unit)
     {
         if (unit == null || selectedUnits.Contains(unit)) return;
+        if (unit.OwnerPlayerId != PlayerColorManager.LocalPlayerIndex) return;
         selectedUnits.Add(unit);
         unit.Select(PlayerColorManager.LocalPlayerColor);
     }
@@ -338,7 +450,6 @@ public class SelectionManager : MonoBehaviour
         else if (selectedUnits.Count > 1)  UnitInfoUI.Instance?.ShowMultiple(selectedUnits);
         else                               UnitInfoUI.Instance?.Hide();
     }
-
     public List<Unit> SelectedUnits    => selectedUnits;
     public Building   SelectedBuilding => selectedBuilding;
 }

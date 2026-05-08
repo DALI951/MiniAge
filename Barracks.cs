@@ -7,17 +7,11 @@ using UnityEngine;
 /// </summary>
 public class Barracks : Building
 {
+    public override int TrainingPriority => 10;
     protected override void Start()
     {
         buildingName = "Barracks";
         base.Start();
-        Debug.Log("[Barracks] Ready.");
     }
 
-    // Example hook: override Select() to add Barracks-specific UI or sounds
-    public override void Select()
-    {
-        base.Select();
-        // e.g., play a military drum sound, show rally-point UI, etc.
-    }
 }

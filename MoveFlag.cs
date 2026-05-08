@@ -1,90 +1,59 @@
 using UnityEngine;
 using System.Collections.Generic;
 
-/// <summary>
-/// Manages movement flags shown at destinations.
-/// Attach to GameManager.
-/// </summary>
 public class MoveFlag : MonoBehaviour
 {
     public static MoveFlag Instance { get; private set; }
 
-    [SerializeField] private GameObject flagPrefab; // a simple flag prefab
+    [SerializeField] private GameObject flagPrefab;
 
-    // Active flags dictionary: position -> flag object
-    private Dictionary<Vector3, GameObject> activeFlags = new Dictionary<Vector3, GameObject>();
-    
+    private List<GameObject> activeFlags = new List<GameObject>();
+    private GameObject rallyFlag;
+
     private void Awake()
     {
         if (Instance != null && Instance != this) { Destroy(gameObject); return; }
         Instance = this;
     }
 
-    /// <summary>Show a move flag. Clears previous ones unless shift held.</summary>
+    /// <summary>Show a single flag (replaces all previous). Call when unit is selected and ordered.</summary>
     public void ShowFlag(Vector3 position, bool addToPath = false)
     {
-        if (flagPrefab == null) 
+        if (flagPrefab == null)
         {
             Debug.LogWarning("[MoveFlag] No flag prefab assigned!");
             return;
         }
-
-        // Round position slightly to handle floating point precision
-        Vector3 keyPos = RoundVector3(position, 2);
 
         if (!addToPath)
         {
-            ClearAllFlags();
+            // Clear old flags
+            foreach (var f in activeFlags)
+                if (f != null) Destroy(f);
+            activeFlags.Clear();
         }
 
-        // Create flag if it doesn't exist at this position
-        if (!activeFlags.ContainsKey(keyPos))
-        {
-            GameObject flag = Instantiate(flagPrefab, position + Vector3.up * 0.1f, Quaternion.identity);
-            activeFlags[keyPos] = flag;
-        }
+        GameObject flag = Instantiate(flagPrefab, position + Vector3.up * 0.3f, Quaternion.identity);
+        activeFlags.Add(flag);
     }
 
-    /// <summary>Show a spawn point flag for a building.</summary>
+    /// <summary>Show rally point flag for buildings.</summary>
     public void ShowSpawnFlag(Vector3 position)
     {
-        ClearAllFlags();
-        if (flagPrefab == null) 
-        {
-            Debug.LogWarning("[MoveFlag] No flag prefab assigned!");
-            return;
-        }
-        
-        Vector3 keyPos = RoundVector3(position, 2);
-        
-        if (!activeFlags.ContainsKey(keyPos))
-        {
-            GameObject flag = Instantiate(flagPrefab, position + Vector3.up * 0.1f, Quaternion.identity);
-            activeFlags[keyPos] = flag;
-        }
+        ClearRallyFlag();
+        if (flagPrefab == null) return;
+        rallyFlag = Instantiate(flagPrefab, position + Vector3.up * 0.3f, Quaternion.identity);
+    }
+
+    public void ClearRallyFlag()
+    {
+        if (rallyFlag != null) { Destroy(rallyFlag); rallyFlag = null; }
     }
 
     public void ClearAllFlags()
     {
-        foreach (var kvp in activeFlags)
-        {
-            if (kvp.Value != null) Destroy(kvp.Value);
-        }
+        foreach (var f in activeFlags)
+            if (f != null) Destroy(f);
         activeFlags.Clear();
-    }
-
-    public void ClearFlags()
-    {
-        ClearAllFlags();
-    }
-
-    private Vector3 RoundVector3(Vector3 vec, int decimals)
-    {
-        float multiplier = Mathf.Pow(10, decimals);
-        return new Vector3(
-            Mathf.Round(vec.x * multiplier) / multiplier,
-            Mathf.Round(vec.y * multiplier) / multiplier,
-            Mathf.Round(vec.z * multiplier) / multiplier
-        );
     }
 }

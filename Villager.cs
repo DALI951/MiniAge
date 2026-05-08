@@ -2,48 +2,40 @@ using UnityEngine;
 using UnityEngine.AI;
 
 /// <summary>
-/// Villager — state-machine driven.
+/// Villager v2 — Slot-based gathering, no clipping, smart overflow.
 ///
-/// States:
-///   Idle            → standing still, no orders
-///   MovingToCommand → player ordered a move (any MoveTo call clears gather orders)
-///   MovingToResource→ walking toward a resource node
-///   AttackingAnimal → hitting the animal until dead
-///   Gathering       → standing next to a node, extracting resources
-///
-/// Root cause fixes:
-///   Bug 2 (desync): animation hooks only fire on state ENTER, never mid-state.
-///   Bug 7 (stuck):  any MoveTo() from outside forces state → MovingToCommand,
-///                   which fully clears the gather assignment.
+/// KEY FIXES:
+/// 1. Uses ResourceNode.ReserveSlot() for explicit slot assignment.
+/// 2. orbitRadius = 2.5f for comfortable 8-villager circle.
+/// 3. Slot index determines exact angle — no random fighting.
+/// 4. On overflow: auto-redirects to same-type or any nearby resource.
+/// 5. NavMeshAgent obstacle avoidance enabled.
 /// </summary>
 public class Villager : Unit
 {
-    // ── Inspector ────────────────────────────────────────────────────────
     [Header("Gathering")]
     [SerializeField] private float gatherRange    = 1.2f;
     [SerializeField] private float gatherInterval = 2f;
     [SerializeField] private int   gatherAmount   = 10;
-    [SerializeField] private float orbitRadius    = 1.2f;
+    [SerializeField] private float orbitRadius    = 2.5f;  // INCREASED from 1.2f
 
-    // ── State machine ────────────────────────────────────────────────────
     private enum VState
     {
         Idle,
-        MovingToCommand,    // explicit player move order — ignores gather logic
-        MovingToResource,   // walking to a resource node
-        AttackingAnimal,    // killing an animal before gathering
-        Gathering,           // actively extracting from node
-        MovingToBuild,  // ADD
-        Building        // ADD
+        MovingToCommand,
+        MovingToResource,
+        AttackingAnimal,
+        Gathering,
+        MovingToBuild,
+        Building
     }
 
     private VState      state          = VState.Idle;
     private ResourceNode targetNode    = null;
-    private int          gatherSlot    = 0;
-    private float        lastActionTime = -99f;  // shared cooldown for attack + gather
+    private int          gatherSlot     = -1;  // -1 = no slot assigned
+    private float        lastActionTime = -99f;
     private ConstructionSite targetSite = null;
 
-    // ── Init ─────────────────────────────────────────────────────────────
     protected override void Awake()
     {
         unitName        = "Villager";
@@ -55,112 +47,148 @@ public class Villager : Unit
         attackRange     = 2f;
         attackCooldown  = 1f;
         base.Awake();
-    }
 
-    // ── Update — state machine tick ──────────────────────────────────────
-    protected override void Update()
-    {
-        switch (state)
+        // Enable NavMesh obstacle avoidance so villagers don't walk through each other
+        if (agent != null)
         {
-            case VState.Idle:
-                break;
-
-            case VState.MovingToCommand:
-                // Wait until NavMesh agent stops, then go Idle
-                if (AgentStopped())
-                    EnterState(VState.Idle);
-                break;
-
-            case VState.MovingToResource:
-                TickMovingToResource();
-                break;
-
-            case VState.AttackingAnimal:
-                TickAttackingAnimal();
-                break;
-
-            case VState.Gathering:
-                TickGathering();
-                break;
-            case VState.MovingToBuild:
-                TickMovingToBuild();
-                break;
-
-            case VState.Building:
-                TickBuilding();
-                break;
+            agent.avoidancePriority = Random.Range(1, 100);
+            agent.radius = 0.4f;
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // PUBLIC API
-    // ─────────────────────────────────────────────────────────────────────
+    protected override void Update()
+    {
+        base.Update();
 
-    /// <summary>
-    /// Order to gather from a node.
-    /// Called by SelectionManager when right-clicking a resource.
-    /// </summary>
+        if (targetNode != null && targetNode.gameObject == null)
+        {
+            targetNode = null;
+            gatherSlot = -1;
+            EnterState(VState.Idle);
+        }
+        if (targetSite != null && targetSite.gameObject == null)
+        {
+            targetSite = null;
+            EnterState(VState.Idle);
+        }
+
+        switch (state)
+        {
+            case VState.Idle: break;
+            case VState.MovingToCommand:
+                if (AgentStopped()) EnterState(VState.Idle);
+                break;
+            case VState.MovingToResource: TickMovingToResource(); break;
+            case VState.AttackingAnimal:    TickAttackingAnimal(); break;
+            case VState.Gathering:          TickGathering(); break;
+            case VState.MovingToBuild:      TickMovingToBuild(); break;
+            case VState.Building:           TickBuilding(); break;
+        }
+    }
+
+    // ── Public API ─────────────────────────────────────────────────────
+
     public void GatherFrom(ResourceNode node)
     {
         if (node == null || node.IsEmpty) return;
 
-        // Release previous slot
+        ClearWaypoints();
         ReleaseCurrentNode();
 
-        // Ask node if there's room (may redirect to nearest)
-        if (!node.RequestGather(this)) return;
+        // CRITICAL: Try to reserve a slot
+        int slot = node.ReserveSlot(this);
+
+        if (slot < 0)
+        {
+            // Node is full — overflow handling is done inside ReserveSlot
+            // It will redirect us to another node automatically
+            // If we get here, no redirect was possible, so we queue
+            gatherSlot = -1;
+            MoveTo(node.transform.position); // Move close and wait (calls ReleaseCurrentNode internally)
+            targetNode = node;               // re-assign AFTER MoveTo clears it
+            EnterState(VState.MovingToResource);
+            return;
+        }
 
         targetNode = node;
-        gatherSlot = node.GathererCount - 1;
+        gatherSlot = slot;
 
-        // Go attack first if animal, else walk to gather spot
         if (node.RequiresKill && !node.IsKilled)
-            EnterState(VState.MovingToResource); // will switch to AttackingAnimal on arrival
+            EnterState(VState.MovingToResource);
         else
             MoveToGatherSlot();
     }
 
-    /// <summary>
-    /// Override base MoveTo — any explicit move order cancels gathering.
-    /// This is the root fix for Bug 7 (villager ignores player commands).
-    /// </summary>
     public override void MoveTo(Vector3 dest)
     {
         ReleaseCurrentNode();
         targetSite = null;
+        ClearWaypoints();
         base.MoveTo(dest);
         EnterState(VState.MovingToCommand);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // STATE TICKS
-    // ─────────────────────────────────────────────────────────────────────
+    /// <summary>Called by ResourceNode when a slot opens up and we're promoted from overflow.</summary>
+    public void OnSlotPromoted(ResourceNode node, int slot)
+    {
+        if (targetNode == node && gatherSlot < 0)
+        {
+            gatherSlot = slot;
+            Debug.Log($"[{name}] Promoted to slot {slot} at {node.name}");
+            if (!node.RequiresKill || node.IsKilled)
+                MoveToGatherSlot();
+        }
+    }
+
+    // ── State Ticks ────────────────────────────────────────────────────
 
     private void TickMovingToResource()
     {
-        if (targetNode == null) { EnterState(VState.Idle); return; }
+        if (targetNode == null || targetNode.IsEmpty)
+        {
+            EnterState(VState.Idle);
+            AutoFindNext();
+            return;
+        }
 
-        float dist = Dist(targetNode);
+        // If we're queued (no slot yet), just wait near the node
+        if (gatherSlot < 0)
+        {
+            float dist = Dist(targetNode);
+            if (dist <= gatherRange + orbitRadius)
+            {
+                agent.ResetPath();
+                // Check if we got promoted
+                if (targetNode != null)
+                {
+                    int newSlot = targetNode.ReserveSlot(this);
+                    if (newSlot >= 0)
+                    {
+                        gatherSlot = newSlot;
+                        if (!targetNode.RequiresKill || targetNode.IsKilled)
+                            MoveToGatherSlot();
+                    }
+                }
+            }
+            return;
+        }
+
+        float d = Dist(targetNode);
 
         if (targetNode.RequiresKill && !targetNode.IsKilled)
         {
-            // Close enough to start fighting
-            if (dist <= attackRange)
-                EnterState(VState.AttackingAnimal);
+            if (d <= attackRange) EnterState(VState.AttackingAnimal);
         }
         else
         {
-            // Close enough to gather
-            if (dist <= gatherRange)
-                EnterState(VState.Gathering);
+            if (d <= gatherRange + 0.5f) EnterState(VState.Gathering);
         }
     }
 
     private void TickAttackingAnimal()
     {
-        if (targetNode == null || targetNode.IsKilled || targetNode.IsEmpty)
+        if (targetNode == null || targetNode.IsEmpty || targetNode.IsKilled)
         {
-            // Animal died — switch to gathering
             if (targetNode != null && !targetNode.IsEmpty)
             { MoveToGatherSlot(); return; }
             AutoFindNext();
@@ -170,7 +198,6 @@ public class Villager : Unit
         float dist = Dist(targetNode);
         if (dist > attackRange)
         {
-            // Drifted away — reapproach
             agent.SetDestination(targetNode.transform.position);
             return;
         }
@@ -182,12 +209,16 @@ public class Villager : Unit
         {
             lastActionTime = Time.time;
             targetNode.TakeDamage(attackDamage);
-            OnAttackAnimal(); // animation hook
 
             if (targetNode.IsKilled)
             {
-                // Recalculate slot based on where animal actually stopped
-                gatherSlot = targetNode.GathererCount;
+                // Recalculate slot based on current gatherer count
+                if (targetNode != null)
+                {
+                    targetNode.ReleaseSlot(this); // release old
+                    int newSlot = targetNode.ReserveSlot(this); // get new position
+                    gatherSlot = Mathf.Max(0, newSlot);
+                }
                 MoveToGatherSlot();
             }
         }
@@ -195,15 +226,30 @@ public class Villager : Unit
 
     private void TickGathering()
     {
-        if (targetNode == null || targetNode.IsEmpty) { AutoFindNext(); return; }
-        // Confirm we are physically gathering (fixes count mismatch)
-        targetNode.ConfirmGathering(this);
-        float dist = Dist(targetNode);
-
-        if (dist > gatherRange)
+        if (targetNode == null || targetNode.IsEmpty)
         {
-            // Walked away somehow — re-approach without changing state
-            agent.SetDestination(targetNode.transform.position);
+            AutoFindNext();
+            return;
+        }
+
+        // Ensure we still have a valid slot
+        if (gatherSlot < 0)
+        {
+            int newSlot = targetNode.ReserveSlot(this);
+            if (newSlot < 0)
+            {
+                // Lost our slot — get redirected or wait
+                MoveTo(targetNode.transform.position);
+                return;
+            }
+            gatherSlot = newSlot;
+        }
+
+        float dist = Dist(targetNode);
+        if (dist > gatherRange + 1.0f)
+        {
+            // Drifted too far — return to slot
+            MoveToGatherSlot();
             return;
         }
 
@@ -213,73 +259,44 @@ public class Villager : Unit
         if (Time.time - lastActionTime >= gatherInterval)
         {
             lastActionTime = Time.time;
-
             int gathered = targetNode.Gather(gatherAmount);
-            OnGatherTick(); // animation hook
 
+            bool isLocalPlayer = OwnerPlayerId == PlayerColorManager.LocalPlayerIndex;
             switch (targetNode.ResourceType)
             {
-                case ResourceType.Wood: ResourceManager.Instance?.AddResources(0, gathered, 0); break;
-                case ResourceType.Gold: ResourceManager.Instance?.AddResources(0, 0, gathered); break;
-                case ResourceType.Food: ResourceManager.Instance?.AddResources(gathered, 0, 0); break;
+                case ResourceType.Wood:
+                    if (isLocalPlayer) ResourceManager.Instance?.AddResources(0, gathered, 0);
+                    else               EnemyAI.Instance?.AddEnemyResources(0, gathered, 0);
+                    break;
+                case ResourceType.Gold:
+                    if (isLocalPlayer) ResourceManager.Instance?.AddResources(0, 0, gathered);
+                    else               EnemyAI.Instance?.AddEnemyResources(0, 0, gathered);
+                    break;
+                case ResourceType.Food:
+                    if (isLocalPlayer) ResourceManager.Instance?.AddResources(gathered, 0, 0);
+                    else               EnemyAI.Instance?.AddEnemyResources(gathered, 0, 0);
+                    break;
             }
 
             if (targetNode.IsEmpty) AutoFindNext();
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // STATE TRANSITIONS
-    // ─────────────────────────────────────────────────────────────────────
-
-    private void EnterState(VState next)
-    {
-        // Exit hooks
-        switch (state)
-        {
-            case VState.Gathering:
-                OnGatherStop(); // animation hook
-                break;
-        }
-
-        state = next;
-
-        // Enter hooks
-        switch (state)
-        {
-            case VState.Idle:
-                break;
-
-            case VState.Gathering:
-                OnGatherStart(); // animation hook
-                break;
-
-            case VState.AttackingAnimal:
-                agent.ResetPath();
-                break;
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // HELPERS
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Helpers ────────────────────────────────────────────────────────
 
     private void MoveToGatherSlot()
     {
-        if (targetNode == null) return;
-
-        // Recalculate slot index based on current gatherer count
-        gatherSlot = targetNode.GathererCount;
-
+    if (targetNode == null) return;
+    if (gatherSlot < 0) return;
+        // FIXED: Use explicit slot index for deterministic positioning
         int   totalSlots = Mathf.Max(targetNode.MaxGatherers, 1);
-        float angle      = (360f / totalSlots) * gatherSlot;
-        float radius     = orbitRadius;
-
-        Vector3 offset = Quaternion.Euler(0, angle, 0) * Vector3.forward * radius;
+        float angleStep  = 360f / totalSlots;
+        float angle      = angleStep * gatherSlot;
+        
+        Vector3 offset = Quaternion.Euler(0, angle, 0) * Vector3.forward * orbitRadius;
         Vector3 dest   = targetNode.transform.position + offset;
 
-        // Snap to NavMesh
-        if (UnityEngine.AI.NavMesh.SamplePosition(dest, out UnityEngine.AI.NavMeshHit hit, 3f, UnityEngine.AI.NavMesh.AllAreas))
+        if (NavMesh.SamplePosition(dest, out NavMeshHit hit, 3f, NavMesh.AllAreas))
             dest = hit.position;
 
         agent.SetDestination(dest);
@@ -288,68 +305,61 @@ public class Villager : Unit
 
     private void AutoFindNext()
     {
-        ResourceType type = targetNode != null
-            ? targetNode.ResourceType : ResourceType.Wood;
-
+        ResourceType type = targetNode != null ? targetNode.ResourceType : ResourceType.Wood;
         ReleaseCurrentNode();
         EnterState(VState.Idle);
 
-        ResourceNode next = ResourceNode.FindNearest(transform.position, type);
-        if (next != null) GatherFrom(next);
+        // Try same type first
+        ResourceNode next = ResourceNode.FindNearest(transform.position, type, null, 50f);
+        if (next != null)
+        {
+            GatherFrom(next);
+            return;
+        }
+
+        // Fallback: any resource type
+        ResourceNode any = ResourceNode.FindNearestAny(transform.position, 80f, null);
+        if (any != null)
+        {
+            GatherFrom(any);
+            return;
+        }
+
+        Debug.Log($"[{name}] No resources available nearby — going idle");
     }
 
     private void ReleaseCurrentNode()
     {
         if (targetNode != null)
         {
-            targetNode.ReleaseGatherer(this);
+            targetNode.ReleaseSlot(this);
             targetNode = null;
         }
+        gatherSlot = -1;
     }
 
     private float Dist(ResourceNode node) =>
-        node == null ? float.MaxValue
-            : Vector3.Distance(transform.position, node.transform.position);
+        node == null ? float.MaxValue : Vector3.Distance(transform.position, node.transform.position);
 
     private bool AgentStopped() =>
-        agent != null && agent.isOnNavMesh &&
-        !agent.pathPending && agent.remainingDistance <= agent.stoppingDistance;
+        agent != null && agent.isOnNavMesh && !agent.pathPending && agent.remainingDistance <= agent.stoppingDistance;
 
-    // ─────────────────────────────────────────────────────────────────────
-    // ANIMATION HOOKS — uncomment Animator lines when you add animations
-    // ─────────────────────────────────────────────────────────────────────
-
-    protected virtual void OnGatherStart()
+    private void EnterState(VState next)
     {
-        // GetComponent<Animator>()?.SetBool("IsGathering", true);
-        Debug.Log("[Villager] Gathering started.");
+        state = next;
+        switch (state)
+        {
+            case VState.Idle:
+                if (agent != null && agent.isOnNavMesh) agent.ResetPath();
+                break;
+            case VState.AttackingAnimal:
+                if (agent != null && agent.isOnNavMesh) agent.ResetPath();
+                break;
+        }
     }
 
-    protected virtual void OnGatherTick()
-    {
-        // GetComponent<Animator>()?.SetTrigger("GatherTick");
-    }
+    // ── Building ───────────────────────────────────────────────────────
 
-    protected virtual void OnGatherStop()
-    {
-        // GetComponent<Animator>()?.SetBool("IsGathering", false);
-        Debug.Log("[Villager] Gathering stopped.");
-    }
-
-    protected virtual void OnAttackAnimal()
-    {
-        // GetComponent<Animator>()?.SetTrigger("Attack");
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // DEATH
-    // ─────────────────────────────────────────────────────────────────────
-
-    protected override void Die()
-    {
-        ReleaseCurrentNode();
-        base.Die();
-    }
     public void BuildAt(ConstructionSite site)
     {
         ReleaseCurrentNode();
@@ -361,25 +371,35 @@ public class Villager : Unit
 
     private void TickMovingToBuild()
     {
-        if (targetSite == null) { EnterState(VState.Idle); return; }
+        if (targetSite == null || targetSite.gameObject == null)
+        { targetSite = null; EnterState(VState.Idle); return; }
         if (Vector3.Distance(transform.position, targetSite.transform.position) <= 2.5f)
             EnterState(VState.Building);
     }
 
     private void TickBuilding()
     {
-        if (targetSite == null || targetSite.IsComplete)
+        if (targetSite == null || targetSite.gameObject == null || targetSite.IsComplete)
         { targetSite = null; EnterState(VState.Idle); return; }
-
         agent.ResetPath();
         transform.LookAt(targetSite.transform.position);
-        // ANIMATION HOOK: GetComponent<Animator>()?.SetBool("IsBuilding", true);
     }
 
     public void OnBuildingComplete()
     {
         targetSite = null;
         EnterState(VState.Idle);
-        // ANIMATION HOOK: GetComponent<Animator>()?.SetBool("IsBuilding", false);
     }
+
+    // ── Death ──────────────────────────────────────────────────────────
+
+    protected override void Die()
+    {
+        ReleaseCurrentNode();
+        targetSite = null;
+        base.Die();
+    }
+    public bool IsGathering => state == VState.Gathering
+                            || state == VState.MovingToResource
+                            || state == VState.AttackingAnimal;
 }

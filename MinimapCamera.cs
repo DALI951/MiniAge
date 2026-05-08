@@ -1,53 +1,63 @@
 using UnityEngine;
+using UnityEngine.UI;
 
-/// <summary>
-/// MinimapCamera — orthographic top-down camera showing the full map.
-///
-/// Fix Bug 1: position and rotation are locked in LateUpdate every frame,
-/// preventing any accidental drift. orthographicSize is set in Start and
-/// re-validated in LateUpdate so it can't be overwritten by other systems.
-/// </summary>
 [RequireComponent(typeof(Camera))]
 public class MinimapCamera : MonoBehaviour
 {
-    [Header("Must match MapBoundary / SpawnAreaManager Half Size")]
-    [SerializeField] private float mapHalfSize = 23f;
-    [SerializeField] private float padding      = 4f;
+    [Header("Map Size")]
+    [SerializeField] private float mapHalfSize = 500f;
+    [SerializeField] private float padding = 4f;
 
-    [Header("Height above scene")]
+    [Header("Height")]
     [SerializeField] private float height = 300f;
 
+    [Header("Target Display")]
+    [SerializeField] private RawImage minimapDisplay;
+
     private Camera cam;
-    private float  targetSize;
+    private RenderTexture rt;
 
     private void Awake()
     {
-        cam        = GetComponent<Camera>();
-        targetSize = mapHalfSize + padding;
-        Apply();
+        cam = GetComponent<Camera>();
+
+        if (MapBoundary.Instance != null)
+            mapHalfSize = MapBoundary.Instance.HalfSize;
+
+        // Position and size the camera
+        cam.orthographic = true;
+        cam.orthographicSize = mapHalfSize + padding;
+        transform.position = new Vector3(0f, height, 0f);
+        transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+
+        // Create render texture
+        int res = 512;
+        rt = new RenderTexture(res, res, 16, RenderTextureFormat.ARGB32);
+        rt.filterMode = FilterMode.Bilinear;
+        rt.Create();
+        cam.targetTexture = rt;
+
+        // Send to UI
+        if (minimapDisplay != null)
+            minimapDisplay.texture = rt;
+        else
+            Debug.LogError("[MinimapCamera] 'Minimap Display' is not assigned! Drag MinimapDisplay RawImage here.");
     }
 
-    private void Start()  => Apply();
-
-    // Re-apply every late update so nothing can accidentally move/resize this camera
-    private void LateUpdate() => Apply();
-
-    private void Apply()
+    private void LateUpdate()
     {
-        cam.orthographic     = true;
-        cam.orthographicSize = targetSize;
-        transform.position   = new Vector3(0f, height, 0f);
-        transform.rotation   = Quaternion.Euler(90f, 0f, 0f);
+        // Lock position so nothing can move it
+        transform.position = new Vector3(0f, height, 0f);
+        transform.rotation = Quaternion.Euler(90f, 0f, 0f);
     }
 
-#if UNITY_EDITOR
-    // Show the camera's view area as a green square in Scene view
-    private void OnDrawGizmos()
+    private void OnDestroy()
     {
-        float s = mapHalfSize + padding;
-        Gizmos.color = Color.green;
-        Vector3 c    = new Vector3(0, 0, 0);
-        Gizmos.DrawWireCube(c, new Vector3(s * 2f, 0.1f, s * 2f));
+        if (rt != null)
+        {
+            cam.targetTexture = null;
+            rt.Release();
+            Destroy(rt);
+        }
     }
-#endif
 }

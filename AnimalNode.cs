@@ -1,10 +1,5 @@
 using UnityEngine;
 
-/// <summary>
-/// AnimalNode — wanders the map until killed by a Villager, then becomes gatherable.
-///
-/// Fix Bug 6: wanderTarget is always clamped by MapBoundary before moving.
-/// </summary>
 public class AnimalNode : ResourceNode
 {
     [Header("Wandering")]
@@ -13,8 +8,8 @@ public class AnimalNode : ResourceNode
     [SerializeField] private float moveSpeed      = 1.5f;
 
     private Vector3 wanderTarget;
-    private float   lastWanderTime = 0f;
-    private bool    stopped        = false;
+    private float   lastWanderTime;
+    private bool    stopped;
 
     protected override void Awake()
     {
@@ -22,26 +17,25 @@ public class AnimalNode : ResourceNode
         wanderTarget = transform.position;
     }
 
-    private void Update()
+    private new void Update()
     {
+        // NOTE: visualRoot toggling is handled by ResourceCullingManager.
+        // Do NOT touch visualRoot here — it causes flicker and fighting.
+
         if (stopped || IsEmpty) return;
 
-        // Pick new wander target periodically
         if (Time.time - lastWanderTime > wanderInterval)
         {
             lastWanderTime = Time.time;
-
-            Vector2 rand     = Random.insideUnitCircle * wanderRadius;
+            Vector2 rand = Random.insideUnitCircle * wanderRadius;
             Vector3 candidate = transform.position + new Vector3(rand.x, 0, rand.y);
 
-            // Always clamp to map — fixes Bug 6
             if (MapBoundary.Instance != null)
                 candidate = MapBoundary.Instance.Clamp(candidate);
 
             wanderTarget = candidate;
         }
 
-        // Move toward target
         transform.position = Vector3.MoveTowards(
             transform.position, wanderTarget, moveSpeed * Time.deltaTime);
 
@@ -51,7 +45,7 @@ public class AnimalNode : ResourceNode
 
     public void StopMoving()
     {
-        stopped      = true;
+        stopped = true;
         wanderTarget = transform.position;
     }
 

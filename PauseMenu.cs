@@ -29,8 +29,15 @@ public class PauseMenu : MonoBehaviour
 
     private void Update()
     {
-        if (Input.GetKeyDown(KeyCode.Escape))
-            TogglePause();
+        if (!Input.GetKeyDown(KeyCode.Escape)) return;
+
+        if (BuildingPlacer.Instance != null && BuildingPlacer.Instance.IsPlacing)
+        {
+            BuildingPlacer.Instance.CancelPlacement();
+            return;
+        }
+
+        TogglePause();
     }
 
     // ─── Public (called by buttons) ──────────────────────────────────────
@@ -45,7 +52,7 @@ public class PauseMenu : MonoBehaviour
         pausePanel?.SetActive(isPaused);
 
         // Show/hide cursor
-        Cursor.lockState = isPaused ? CursorLockMode.None : CursorLockMode.None;
+        Cursor.lockState = CursorLockMode.None;
         Cursor.visible   = true;
     }
 

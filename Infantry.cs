@@ -14,13 +14,4 @@ public class Infantry : Unit
         attackCooldown  = 1.2f;
         base.Awake();
     }
-
-    protected override void PerformAttack(Unit target)
-    {
-        // ── ANIMATION HOOK ──────────────────────────────────────────────
-        // Animator anim = GetComponent<Animator>();
-        // if (anim != null) anim.SetTrigger("MeleeAttack");
-        // ────────────────────────────────────────────────────────────────
-        base.PerformAttack(target);
-    }
 }

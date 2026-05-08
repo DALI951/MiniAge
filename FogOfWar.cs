@@ -1,77 +1,82 @@
 using UnityEngine;
-using UnityEngine.UI;
 
-/// <summary>
-/// FogOfWar — grid-based fog of war rendered as a texture on a UI RawImage
-/// that covers the entire screen.
-///
-/// Three states per cell:
-///   0 = Unexplored   → fully black
-///   1 = Explored     → dark gray overlay (you've been here but can't see it now)
-///   2 = Visible      → clear (a unit is nearby right now)
-///
-/// Setup in Unity:
-///   1. Attach this script to GameManager.
-///   2. Create a UI RawImage in your Canvas that covers the FULL screen.
-///      Set its color to white. Name it "FogOverlay".
-///   3. Drag FogOverlay into the fogOverlay field.
-///   4. Set mapHalfSize to match your MapBoundary / SpawnAreaManager.
-///   5. Each unit that should reveal fog: attach FogRevealer.cs to it.
-/// </summary>
+[DefaultExecutionOrder(-50)]
 public class FogOfWar : MonoBehaviour
 {
     public static FogOfWar Instance { get; private set; }
 
-    [Header("References")]
-    [Tooltip("A full-screen RawImage in the Canvas. Set its color to white.")]
-    [SerializeField] private RawImage fogOverlay;
+    [Header("World-Space Rendering")]
+    [SerializeField] private MeshRenderer fogPlaneRenderer;
 
-    [Header("Map Settings — match SpawnAreaManager")]
+    [Header("Map Settings")]
     [SerializeField] private float mapHalfSize = 23f;
 
     [Header("Grid Resolution")]
-    [Tooltip("Higher = sharper fog edges but slower. 128 is a good default.")]
     [SerializeField] private int resolution = 128;
 
     [Header("Colors")]
-    [SerializeField] private Color unexploredColor = new Color(0f, 0f, 0f, 1f);
-    [SerializeField] private Color exploredColor   = new Color(0f, 0f, 0f, 0.55f);
+    [SerializeField] private Color unexploredColor = new Color(0.02f, 0.02f, 0.05f, 1f);
+    [SerializeField] private Color exploredColor   = new Color(0.15f, 0.12f, 0.08f, 0.50f);
     [SerializeField] private Color visibleColor    = new Color(0f, 0f, 0f, 0f);
 
-    // ── Runtime ───────────────────────────────────────────────────────────
+    // Runtime
     private Texture2D fogTexture;
-    private byte[]    cellState;     // 0=unseen, 1=explored, 2=visible
+    private byte[]    cellState;
     private Color[]   pixels;
     private bool      dirty = true;
+    private Material  fogMaterial;
 
     private void Awake()
     {
         if (Instance != null && Instance != this) { Destroy(gameObject); return; }
         Instance = this;
 
-        // Create fog texture
-        fogTexture         = new Texture2D(resolution, resolution, TextureFormat.RGBA32, false);
-        fogTexture.filterMode = FilterMode.Bilinear;
-        cellState          = new byte[resolution * resolution];
-        pixels             = new Color[resolution * resolution];
+        if (MapBoundary.Instance != null)
+            mapHalfSize = MapBoundary.Instance.HalfSize;
 
-        // Start fully black
+        if (fogPlaneRenderer == null)
+        {
+            Debug.LogError("[FogOfWar] Fog Plane Renderer NOT assigned!");
+            enabled = false;
+            return;
+        }
+
+        fogMaterial = fogPlaneRenderer.material;
+        fogMaterial.SetFloat("_MapHalfSize", mapHalfSize);
+
+        fogTexture = new Texture2D(resolution, resolution, TextureFormat.RGBA32, false);
+        fogTexture.filterMode = FilterMode.Bilinear;
+        fogTexture.wrapMode   = TextureWrapMode.Clamp;
+        cellState = new byte[resolution * resolution];
+        pixels    = new Color[resolution * resolution];
+
         for (int i = 0; i < pixels.Length; i++)
             pixels[i] = unexploredColor;
 
         fogTexture.SetPixels(pixels);
         fogTexture.Apply();
-
-        if (fogOverlay != null)
-            fogOverlay.texture = fogTexture;
+        fogMaterial.SetTexture("_FogTex", fogTexture);
     }
 
-    // ── Called by FogRevealer every frame ─────────────────────────────────
+    private void Start()
+    {
+        // CRITICAL FIX: Much smaller starting reveal
+        // Was: max(20, mapHalfSize * 0.12) → 60 for 1000x1000
+        // Now: mapHalfSize * 0.04, clamped to 15 max
+        // For 1000x1000: 500 * 0.04 = 20 units
+        // For 100x100: 50 * 0.04 = 2 units → clamped to 15
 
-    /// <summary>
-    /// Reveal a circle of cells around worldPos.
-    /// radiusWorld is the sight range in world units.
-    /// </summary>
+        float revealRadius = Mathf.Clamp(mapHalfSize * 0.04f, 8f, 20f);
+
+        Vector3 revealCenter = Vector3.zero;
+        SpawnAreaManager area = FindObjectOfType<SpawnAreaManager>();
+        if (area != null)
+            revealCenter = area.GetSpawnPosition(PlayerColorManager.LocalPlayerIndex);
+
+        Debug.Log($"[FogOfWar] Starting reveal radius: {revealRadius:F1} at {revealCenter}");
+        Reveal(revealCenter, revealRadius);
+    }
+
     public void Reveal(Vector3 worldPos, float radiusWorld)
     {
         int cx = WorldToCell(worldPos.x);
@@ -90,19 +95,15 @@ public class FogOfWar : MonoBehaviour
                 int idx = py * resolution + px;
                 if (cellState[idx] < 2)
                 {
-                    cellState[idx] = 2; // visible
+                    cellState[idx] = 2;
                     dirty = true;
                 }
             }
         }
     }
 
-    // ── Called once per frame (LateUpdate) to rebuild texture if needed ───
-
     private void LateUpdate()
     {
-        // Step 1: downgrade all "visible" cells to "explored"
-        // (they'll be re-upgraded by revealers this frame)
         bool needsDowngrade = false;
         for (int i = 0; i < cellState.Length; i++)
         {
@@ -113,11 +114,6 @@ public class FogOfWar : MonoBehaviour
             }
         }
         if (needsDowngrade) dirty = true;
-
-        // Note: FogRevealers call Reveal() in their Update (before LateUpdate)
-        // so visible cells get re-marked 2 before we rebuild the texture here.
-        // The order is: Update (revealers reveal) → LateUpdate (we rebuild).
-
         if (!dirty) return;
         dirty = false;
 
@@ -135,21 +131,25 @@ public class FogOfWar : MonoBehaviour
         fogTexture.Apply(false);
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────
-
     private int WorldToCell(float worldCoord)
     {
-        // Map [-halfSize, +halfSize] → [0, resolution]
         float t = (worldCoord + mapHalfSize) / (mapHalfSize * 2f);
         return Mathf.Clamp(Mathf.FloorToInt(t * resolution), 0, resolution - 1);
     }
 
-    /// <summary>Returns true if a world position is currently visible.</summary>
     public bool IsVisible(Vector3 worldPos)
     {
         int cx  = WorldToCell(worldPos.x);
         int cy  = WorldToCell(worldPos.z);
         int idx = cy * resolution + cx;
         return cellState[idx] == 2;
+    }
+
+    public bool IsExplored(Vector3 worldPos)
+    {
+        int cx  = WorldToCell(worldPos.x);
+        int cy  = WorldToCell(worldPos.z);
+        int idx = cy * resolution + cx;
+        return cellState[idx] >= 1;
     }
 }

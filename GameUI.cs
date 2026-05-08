@@ -4,9 +4,9 @@ using UnityEngine.UI;
 using TMPro;
 
 /// <summary>
-/// GameUI v11 — building spawn panel.
-/// Wire the close button's OnClick to ClosePanel() in the Inspector,
-/// OR assign it to the closeButton field and it auto-wires.
+/// GameUI — building spawn panel + live training status.
+/// Training UI always updates as long as a building is tracked,
+/// even when the panel is closed (so it's fresh on re-open).
 /// </summary>
 public class GameUI : MonoBehaviour
 {
@@ -17,31 +17,56 @@ public class GameUI : MonoBehaviour
     [SerializeField] private Transform  buttonContainer;
     [SerializeField] private GameObject spawnButtonPrefab;
     [SerializeField] private TMP_Text   buildingNameText;
-    [SerializeField] private Button     closeButton;       // X button on the panel
+    [SerializeField] private Button     closeButton;
+
+    [Header("Training Progress")]
+    [SerializeField] private Image    trainingProgressFill;   // Image (filled)
+    [SerializeField] private TMP_Text trainingStatusText;     // "Training: Infantry x3  67%"
+    [SerializeField] private TMP_Text trainingQueueText;      // "Next: Cavalry | Infantry x2"
+    [SerializeField] private GameObject trainingAlwaysPanel;
+    
+    [Header("Training Panel - Slot 2")]
+    [SerializeField] private Image      trainingProgressFill2;
+    [SerializeField] private TMP_Text   trainingStatusText2;
+    [SerializeField] private TMP_Text   trainingQueueText2;
+    [SerializeField] private GameObject trainingAlwaysPanel2;
 
     private Building             activeBuilding;
+    private Building             slot1Building;
+    private Building             activeBuildingSlot2;
     private readonly List<GameObject> spawnedButtons = new List<GameObject>();
+
+    // ────────────────────────────────────────────────────────────────────
 
     private void Awake()
     {
         if (Instance != null && Instance != this) { Destroy(gameObject); return; }
         Instance = this;
-
-        if (closeButton != null)
-            closeButton.onClick.AddListener(HideBuildingUI);
-
-        // Start hidden — safe null check
-        if (buildingPanel != null)
-            buildingPanel.SetActive(false);
+        closeButton?.onClick.AddListener(HideBuildingUI);
+        buildingPanel?.SetActive(false);
     }
 
-    // ─── Public API ──────────────────────────────────────────────────────
+    private void Update()
+    {
+        // Slot 1 panel — always shows HomeSite training
+        Building display1 = slot1Building != null && slot1Building.IsTraining ? slot1Building : null;
+        if (display1 != null) RefreshTrainingUIFor(display1);
+        else                  ClearTrainingUI();
+
+        // Slot 2 panel — always shows Barracks training
+        Building display2 = activeBuildingSlot2 != null && activeBuildingSlot2.IsTraining ? activeBuildingSlot2 : null;
+        if (display2 != null) RefreshTrainingUIForSlot2(display2);
+        else                  ClearTrainingUISlot2();
+    }
+
+    // ── Public API ───────────────────────────────────────────────────────
 
     public void ShowBuildingUI(Building building)
     {
         UnitInfoUI.Instance?.Hide();
         ResourceInfoUI.Instance?.Hide();
         if (building == null) return;
+
         activeBuilding = building;
 
         if (buildingNameText != null)
@@ -49,22 +74,73 @@ public class GameUI : MonoBehaviour
 
         RebuildSpawnButtons(building);
 
-        if (buildingPanel != null)
-            buildingPanel.SetActive(true);
+        buildingPanel?.SetActive(true);
+        RefreshTrainingUIFor(building);
     }
 
     public void HideBuildingUI()
     {
-        if (buildingPanel != null)
-            buildingPanel.SetActive(false);
+        buildingPanel?.SetActive(false);
         activeBuilding = null;
         ClearButtons();
     }
 
-    // Alias so it can be called from button OnClick in Inspector
-    public void ClosePanel() => HideBuildingUI();
+    // ── Training UI ──────────────────────────────────────────────────────
+    
+    private void RefreshTrainingUIFor(Building b)
+    {
+        if (trainingAlwaysPanel != null) trainingAlwaysPanel.SetActive(true);
 
-    // ─── Private ─────────────────────────────────────────────────────────
+        float  pct   = b.TrainingProgress;
+        string label = b.CurrentTrainingLabel;
+
+        if (trainingProgressFill) trainingProgressFill.fillAmount = pct;
+        if (trainingStatusText)
+            trainingStatusText.text = string.IsNullOrEmpty(label)
+                ? "" : $"{b.BuildingName}: {label}  {(pct * 100f):F0}%";
+
+        string[] queue = b.GetQueueLabels();
+        if (trainingQueueText)
+            trainingQueueText.text = queue.Length == 0 ? "" : "Next: " + string.Join(" | ", queue);
+    }
+
+    private void ClearTrainingUI()
+    {
+        if (trainingAlwaysPanel != null) trainingAlwaysPanel.SetActive(false);
+        if (trainingProgressFill) trainingProgressFill.fillAmount = 0f;
+        if (trainingStatusText)   trainingStatusText.text = "";
+        if (trainingQueueText)    trainingQueueText.text  = "";
+    }
+
+    public void RegisterBuilding(Building b)
+    {
+        if (b is HomeSite)   slot1Building       = b;
+        else if (b is Barracks) activeBuildingSlot2 = b;
+    }
+
+    private void RefreshTrainingUIForSlot2(Building b)
+    {
+        if (trainingAlwaysPanel2 != null) trainingAlwaysPanel2.SetActive(true);
+        float  pct   = b.TrainingProgress;
+        string label = b.CurrentTrainingLabel;
+        if (trainingProgressFill2) trainingProgressFill2.fillAmount = pct;
+        if (trainingStatusText2)
+            trainingStatusText2.text = string.IsNullOrEmpty(label)
+                ? "" : $"{b.BuildingName}: {label}  {(pct * 100f):F0}%";
+        string[] queue = b.GetQueueLabels();
+        if (trainingQueueText2)
+            trainingQueueText2.text = queue.Length == 0 ? "" : "Next: " + string.Join(" | ", queue);
+    }
+
+    private void ClearTrainingUISlot2()
+    {
+        if (trainingAlwaysPanel2 != null) trainingAlwaysPanel2.SetActive(false);
+        if (trainingProgressFill2) trainingProgressFill2.fillAmount = 0f;
+        if (trainingStatusText2)   trainingStatusText2.text = "";
+        if (trainingQueueText2)    trainingQueueText2.text  = "";
+    }
+
+    // ── Spawn buttons ────────────────────────────────────────────────────
 
     private void RebuildSpawnButtons(Building building)
     {
@@ -82,7 +158,7 @@ public class GameUI : MonoBehaviour
             spawnedButtons.Add(btnObj);
 
             TMP_Text txt = btnObj.GetComponentInChildren<TMP_Text>();
-            if (txt != null) txt.text = $"Spawn\n{label}";
+            if (txt != null) txt.text = $"Train\n{label}";
 
             Button btn = btnObj.GetComponent<Button>();
             if (btn != null)
@@ -99,11 +175,7 @@ public class GameUI : MonoBehaviour
 
     private void OnSpawnButtonClicked(int index)
     {
-        if (activeBuilding == null)
-        {
-            Debug.LogWarning("[GameUI] No active building.");
-            return;
-        }
+        if (activeBuilding == null) { Debug.LogWarning("[GameUI] No active building."); return; }
         activeBuilding.SpawnUnit(index);
     }
 }

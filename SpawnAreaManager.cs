@@ -14,8 +14,8 @@ public class SpawnAreaManager : MonoBehaviour
     [Tooltip("Centre of the play area in world space.")]
     [SerializeField] private Vector3 areaCenter   = Vector3.zero;
 
-    [Tooltip("Half-size of the square (e.g. 40 → 80×80 units total).")]
-    [SerializeField] private float   areaHalfSize = 40f;
+    [Tooltip("Half-size of the square (e.g. 40 → 80×80 units total). Overridden from MapBoundary when present.")]
+    [SerializeField] private float   areaHalfSize = 23f;
 
     [Tooltip("Number of spawn points distributed around the perimeter.")]
     [SerializeField] private int     spawnPointCount = 10;
@@ -38,6 +38,9 @@ public class SpawnAreaManager : MonoBehaviour
     // ─── Unity Lifecycle ─────────────────────────────────────────────────
     private void Awake()
     {
+        if (MapBoundary.Instance != null)
+            areaHalfSize = MapBoundary.Instance.HalfSize;
+
         GenerateSpawnPoints();
         PlaceMarkers();
     }

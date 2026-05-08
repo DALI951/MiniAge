@@ -6,6 +6,7 @@ using UnityEngine;
 /// </summary>
 public class RTSCamera : MonoBehaviour
 {
+    public static bool SkipNextFrame { get; set; } = false;
     [Header("Pan")]
     [SerializeField] private float panSpeed        = 20f;
     [SerializeField] private float edgePanThreshold = 10f;
@@ -15,26 +16,39 @@ public class RTSCamera : MonoBehaviour
     [SerializeField] private float zoomSpeed = 5f;
     [SerializeField] private float minHeight = 5f;
     [SerializeField] private float maxHeight = 50f;
+
+    [Header("Map Clamp")]
+    [Tooltip("Extra camera movement beyond map bounds so screen edges can still reach the full map.")]
+    [SerializeField] private float edgeAccessPadding = 8f;
     private void Start()
     {
-        float fraction = 200f / Screen.height;
-        Camera.main.rect = new Rect(0, fraction, 1, 1 - fraction);
-        // Find player 0's spawn point and center the camera there
+        Vector3 focus = Vector3.zero;
         SpawnAreaManager area = FindObjectOfType<SpawnAreaManager>();
         if (area != null)
         {
-            Vector3 spawnPos = area.GetSpawnPosition(
-                PlayerColorManager.LocalPlayerIndex);
-            transform.position = new Vector3(spawnPos.x, 20f, spawnPos.z - 10f);
+            int idx = PlayerColorManager.LocalPlayerIndex;
+            focus = area.GetSpawnPosition(idx);
+            Vector3 toCenter = Vector3.zero - focus;
+            if (toCenter.sqrMagnitude > 0.001f)
+                focus += toCenter.normalized * 10f;
         }
+
+        float y = transform.position.y;
+        if (y <= 0.01f) y = 30f;
+        transform.position = new Vector3(focus.x, y, focus.z);
+        ClampToMap();
     }
     private void Update()
     {
-        HandlePan();
-        HandleZoom();
+        if (!SkipNextFrame)
+        {
+            HandlePan();
+            HandleZoom();
+        }
+        SkipNextFrame = false;
+        
         ClampToMap();
     }
-
     private void HandlePan()
     {
         Vector3 move = Vector3.zero;
@@ -63,7 +77,7 @@ public class RTSCamera : MonoBehaviour
 
         Vector3 pos = transform.position;
         pos.y -= scroll * zoomSpeed * 10f;
-        pos.y  = Mathf.Clamp(pos.y, minHeight, maxHeight);
+        pos.y = Mathf.Clamp(pos.y, minHeight, maxHeight);
         transform.position = pos;
     }
 
@@ -71,7 +85,7 @@ public class RTSCamera : MonoBehaviour
     {
         if (MapBoundary.Instance == null) return;
 
-        float limit = MapBoundary.Instance.CameraLimit;
+        float limit = MapBoundary.Instance.CameraLimit + Mathf.Max(0f, edgeAccessPadding);
         Vector3 pos = transform.position;
         pos.x = Mathf.Clamp(pos.x, -limit, limit);
         pos.z = Mathf.Clamp(pos.z, -limit, limit);

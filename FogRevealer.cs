@@ -15,6 +15,8 @@ public class FogRevealer : MonoBehaviour
 
     private void Update()
     {
+        Unit u = GetComponent<Unit>();
+        if (u != null && u.OwnerPlayerId != PlayerColorManager.LocalPlayerIndex) return;
         FogOfWar.Instance?.Reveal(transform.position, sightRadius);
     }
 }

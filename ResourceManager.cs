@@ -14,6 +14,9 @@ public class ResourceManager : MonoBehaviour
     [SerializeField] private int startingFood  = 200;
     [SerializeField] private int startingWood  = 150;
     [SerializeField] private int startingGold  = 100;
+    [Header("Population")]
+    [SerializeField] private int maxPopulation = 20;
+    private int currentPopulation = 0;
 
     // ─── Runtime State ───────────────────────────────────────────────────
     private int food;
@@ -61,9 +64,24 @@ public class ResourceManager : MonoBehaviour
         AddResources(-costFood, -costWood, -costGold);
         return true;
     }
+    public bool CanAddPopulation(int amount = 1)
+        => currentPopulation + amount <= maxPopulation;
 
+    public void AddPopulation(int amount = 1)
+    {
+        currentPopulation = Mathf.Clamp(currentPopulation + amount, 0, maxPopulation);
+        ResourceUI.Instance?.RefreshPopulation(currentPopulation, maxPopulation);
+    }
+
+    public void RemovePopulation(int amount = 1)
+    {
+        currentPopulation = Mathf.Max(0, currentPopulation - amount);
+        ResourceUI.Instance?.RefreshPopulation(currentPopulation, maxPopulation);
+    }
     // ─── Properties ──────────────────────────────────────────────────────
     public int Food => food;
     public int Wood => wood;
     public int Gold => gold;
+    public int CurrentPopulation => currentPopulation;
+    public int MaxPopulation     => maxPopulation;
 }

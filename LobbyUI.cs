@@ -57,7 +57,6 @@ public class LobbyUI : MonoBehaviour
 
     private void Start()
     {
-        // Wire color buttons
         for (int i = 0; i < colorButtons.Length; i++)
         {
             int idx = i;
@@ -68,7 +67,6 @@ public class LobbyUI : MonoBehaviour
                 cb.normalColor    = LobbyPlayer.AvailableColors[i];
                 cb.highlightedColor = LobbyPlayer.AvailableColors[i] * 1.2f;
                 colorButtons[i].colors = cb;
-                // Clear button text
                 var txt = colorButtons[i].GetComponentInChildren<TMP_Text>();
                 if (txt != null) txt.text = "";
             }
@@ -76,12 +74,8 @@ public class LobbyUI : MonoBehaviour
 
         readyButton?.onClick.AddListener(OnReadyClicked);
         startButton?.onClick.AddListener(OnStartClicked);
-
-        // Name input — send to server when edited
         nameInputField?.onEndEdit.AddListener(OnNameEdited);
     }
-
-    // ── Show / Hide ───────────────────────────────────────────────────
 
     public void ShowLobby()
     {
@@ -98,16 +92,15 @@ public class LobbyUI : MonoBehaviour
 
     public void HideLobby() => lobbyPanel?.SetActive(false);
 
-    // ── Player registration ───────────────────────────────────────────
-
     public void RegisterPlayer(LobbyPlayer player)
     {
+        if (player == null) return;
         if (!players.Contains(player)) players.Add(player);
         if (player.isLocalPlayer)
         {
             localPlayer = player;
             if (nameInputField != null)
-                nameInputField.text = player.playerName;
+                nameInputField.text = !string.IsNullOrEmpty(player.displayName) ? player.displayName : player.playerName;
         }
         RefreshPlayerList();
     }
@@ -118,8 +111,6 @@ public class LobbyUI : MonoBehaviour
         if (localPlayer == player) localPlayer = null;
         RefreshPlayerList();
     }
-
-    // ── Refresh player rows ───────────────────────────────────────────
 
     public void RefreshPlayerList()
     {
@@ -133,15 +124,16 @@ public class LobbyUI : MonoBehaviour
             GameObject row = Instantiate(playerRowPrefab, playerListContainer);
             playerRows.Add(row);
 
-            // Name
             var nameText = row.transform.Find("NameText")?.GetComponent<TMP_Text>();
-            if (nameText) nameText.text = p.playerName;
+            if (nameText)
+            {
+                string display = !string.IsNullOrEmpty(p.displayName) ? p.displayName : p.playerName;
+                nameText.text = string.IsNullOrEmpty(display) ? $"Player {p.playerIndex + 1}" : display;
+            }
 
-            // Color swatch
             var colorImg = row.transform.Find("ColorImage")?.GetComponent<Image>();
             if (colorImg) colorImg.color = p.playerColor;
 
-            // Team badge
             var teamText = row.transform.Find("TeamText")?.GetComponent<TMP_Text>();
             if (teamText)
             {
@@ -149,7 +141,6 @@ public class LobbyUI : MonoBehaviour
                 teamText.color = GetTeamColor(p.teamIndex);
             }
 
-            // Ready indicator
             var readyText = row.transform.Find("ReadyText")?.GetComponent<TMP_Text>();
             if (readyText)
             {
@@ -157,7 +148,6 @@ public class LobbyUI : MonoBehaviour
                 readyText.color = p.isReady ? Color.green : Color.gray;
             }
 
-            // Team change buttons (only for local player's row)
             var teamUpBtn   = row.transform.Find("TeamUpBtn")?.GetComponent<Button>();
             var teamDownBtn = row.transform.Find("TeamDownBtn")?.GetComponent<Button>();
             if (teamUpBtn != null)
@@ -175,7 +165,6 @@ public class LobbyUI : MonoBehaviour
                     captured.CmdSetTeam((captured.teamIndex + 3) % 4));
             }
 
-            // Color picker button (only for local player's row)
             var colorBtn = row.transform.Find("ColorBtn")?.GetComponent<Button>();
             if (colorBtn != null)
             {
@@ -183,7 +172,6 @@ public class LobbyUI : MonoBehaviour
                 colorBtn.onClick.AddListener(ToggleColorPicker);
             }
 
-            // Kick button (host only, not self)
             var kickBtn = row.transform.Find("KickButton")?.GetComponent<Button>();
             if (kickBtn != null)
             {
@@ -212,18 +200,23 @@ public class LobbyUI : MonoBehaviour
         }
     }
 
+    private int RequiredPlayerCount()
+    {
+        if (RTSNetworkManager.Instance != null)
+            return Mathf.Max(1, RTSNetworkManager.Instance.requiredPlayers);
+        return 2;
+    }
+
     private void UpdateStartButton()
     {
         if (startButton == null) return;
-        bool allReady = players.Count >= 2;
+        bool allReady = players.Count >= RequiredPlayerCount();
         foreach (LobbyPlayer p in players)
             if (p != null && !p.isReady) { allReady = false; break; }
         startButton.interactable = allReady;
         if (startButtonText != null)
             startButtonText.text = allReady ? "▶  Start Game" : "Waiting for players...";
     }
-
-    // ── Color Picker ─────────────────────────────────────────────────
 
     public void ToggleColorPicker()
     {
@@ -239,8 +232,6 @@ public class LobbyUI : MonoBehaviour
         colorPickerPanel?.SetActive(false);
         colorPickerOpen = false;
     }
-
-    // ── Other handlers ────────────────────────────────────────────────
 
     private void OnNameEdited(string newName)
     {

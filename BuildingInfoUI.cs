@@ -74,10 +74,15 @@ public class BuildingInfoUI : MonoBehaviour
         UnitInfoUI.Instance?.Hide();
         ResourceInfoUI.Instance?.Hide();
 
+        bool isEnemy = building.OwnerPlayerId != PlayerColorManager.LocalPlayerIndex;
         if (nameText) nameText.text = building.BuildingName;
         if (constructionGroup) constructionGroup.SetActive(false);
-        if (setSpawnPointButton) setSpawnPointButton.gameObject.SetActive(true);
-        if (spawnPointStatusText) spawnPointStatusText.text = "Click to set spawn point";
+        if (setSpawnPointButton) setSpawnPointButton.gameObject.SetActive(!isEnemy);
+        if (spawnPointStatusText)
+        {
+            spawnPointStatusText.gameObject.SetActive(!isEnemy);
+            if (!isEnemy) spawnPointStatusText.text = "Click to set spawn point";
+        }
 
         RefreshBuilding();
         panel?.SetActive(true);
@@ -104,14 +109,16 @@ public class BuildingInfoUI : MonoBehaviour
         trackedSite      = null;
         settingSpawnPoint = false;
         panel?.SetActive(false);
-        MoveFlag.Instance?.ClearFlags();
+        MoveFlag.Instance?.ClearRallyFlag();
     }
 
     private void RefreshBuilding()
     {
-        // Buildings don't have health yet — placeholder
-        if (healthText) healthText.text = "HP: Full";
-        if (healthBarFill) healthBarFill.fillAmount = 1f;
+        if (trackedBuilding == null) return;
+        int cur = trackedBuilding.CurrentBuildingHealth;
+        int max = trackedBuilding.MaxBuildingHealth;
+        if (healthText)    healthText.text         = $"HP: {cur} / {max}";
+        if (healthBarFill) healthBarFill.fillAmount = max > 0 ? Mathf.Clamp01((float)cur / max) : 1f;
     }
 
     private void RefreshSite()

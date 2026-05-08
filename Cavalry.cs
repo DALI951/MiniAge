@@ -23,12 +23,9 @@ public class Cavalry : Unit
         if (agent != null) agent.speed = baseSpeed * speedMultiplier;
     }
 
-    protected override void PerformAttack(Unit target)
+    public override void RestoreSpeed()
     {
-        // ── ANIMATION HOOK ──────────────────────────────────────────────
-        // Animator anim = GetComponent<Animator>();
-        // if (anim != null) anim.SetTrigger("ChargeAttack");
-        // ────────────────────────────────────────────────────────────────
-        base.PerformAttack(target);
+        if (agent != null) agent.speed = baseSpeed * speedMultiplier;
     }
+
 }

@@ -11,6 +11,7 @@ using UnityEngine;
 ///   Bug 6 (animals leave map) — AnimalNode calls Clamp every frame.
 ///   Feature 3 (camera + unit boundaries).
 /// </summary>
+[DefaultExecutionOrder(-100)]
 public class MapBoundary : MonoBehaviour
 {
     public static MapBoundary Instance { get; private set; }

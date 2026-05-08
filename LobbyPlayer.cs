@@ -4,7 +4,6 @@ using TMPro;
 
 public class LobbyPlayer : NetworkBehaviour
 {
-    // Synced to all clients automatically
     [SyncVar(hook = nameof(OnNameChanged))]
     public string playerName = "Player";
 
@@ -16,29 +15,22 @@ public class LobbyPlayer : NetworkBehaviour
 
     [SyncVar(hook = nameof(OnReadyChanged))]
     public bool isReady = false;
-    [SyncVar(hook = nameof(OnTeamChanged))]
-    public int teamIndex = 0; // 0 = Team 1, 1 = Team 2, etc.
 
-    [SyncVar(hook = nameof(OnNameChanged2))]
+    [SyncVar(hook = nameof(OnTeamChanged))]
+    public int teamIndex = 0;
+
+    [SyncVar(hook = nameof(OnNameChanged))]
     public string displayName = "";
 
-    // Available colors players can pick
     public static readonly Color[] AvailableColors = new Color[]
     {
-        Color.cyan,
-        Color.red,
-        new Color(1f, 0.5f, 0f), // Orange
-        Color.green,
-        Color.magenta,
-        Color.yellow,
-        new Color(0.5f, 0f, 1f), // Purple
-        Color.white,
+        Color.cyan, Color.red, new Color(1f, 0.5f, 0f), Color.green,
+        Color.magenta, Color.yellow, new Color(0.5f, 0f, 1f), Color.white,
     };
 
     public override void OnStartClient()
     {
         base.OnStartClient();
-        // Register with lobby UI whenever this player object is created on any client
         LobbyUI.Instance?.RegisterPlayer(this);
     }
 
@@ -48,22 +40,18 @@ public class LobbyPlayer : NetworkBehaviour
         LobbyUI.Instance?.UnregisterPlayer(this);
     }
 
-    // ── Called by host to assign index and default color ─────────────────
     [Server]
     public void ServerSetup(int index)
     {
         playerIndex = index;
         playerColor = AvailableColors[index % AvailableColors.Length];
         playerName  = $"Player {index + 1}";
-        teamIndex   = index % 2; // alternate teams by default
+        displayName = playerName;
+        teamIndex   = index % 2;
     }
 
-    // ── Commands — called by owning client, run on server ─────────────────
     [Command]
-    public void CmdSetColor(Color color)
-    {
-        playerColor = color;
-    }
+    public void CmdSetColor(Color color) => playerColor = color;
 
     [Command]
     public void CmdSetReady(bool ready)
@@ -71,22 +59,19 @@ public class LobbyPlayer : NetworkBehaviour
         isReady = ready;
         RTSNetworkManager.Instance?.CheckAllReady();
     }
+
     [Command]
     public void CmdSetName(string name)
     {
         playerName = name.Length > 0 ? name : $"Player {playerIndex + 1}";
+        displayName = playerName;
     }
 
     [Command]
-    public void CmdSetTeam(int team)
-    {
-        teamIndex = team;
-    }
+    public void CmdSetTeam(int team) => teamIndex = team;
 
-    // ── Hooks — run on all clients when SyncVar changes ───────────────────
     void OnNameChanged(string oldVal, string newVal)  => LobbyUI.Instance?.RefreshPlayerList();
     void OnColorChanged(Color oldVal, Color newVal)   => LobbyUI.Instance?.RefreshPlayerList();
     void OnReadyChanged(bool oldVal, bool newVal)     => LobbyUI.Instance?.RefreshPlayerList();
-    void OnTeamChanged(int oldVal, int newVal)  => LobbyUI.Instance?.RefreshPlayerList();
-    void OnNameChanged2(string oldVal, string newVal) => LobbyUI.Instance?.RefreshPlayerList();
+    void OnTeamChanged(int oldVal, int newVal)        => LobbyUI.Instance?.RefreshPlayerList();
 }

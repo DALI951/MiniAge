@@ -1,19 +1,15 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-/// <summary>
-/// ResourceNode — base class for Tree, Mine, Animal.
-///
-/// Fix Bug 5: OnDepleted now uses Destroy(gameObject) immediately after
-///            hiding visuals, with a short delay for a smooth fade.
-///            The node marks itself IsEmpty first so no new gatherers attach.
-/// </summary>
 public class ResourceNode : MonoBehaviour
 {
+    private static readonly List<ResourceNode> RegisteredNodes = new List<ResourceNode>();
+    public static IReadOnlyList<ResourceNode> AllNodes => RegisteredNodes;
+
     [Header("=== RESOURCE TYPE ===")]
     [SerializeField] private ResourceType resourceType = ResourceType.Wood;
 
-    [Header("=== KILL REQUIRED? (Animals only — tick this) ===")]
+    [Header("=== KILL REQUIRED? (Animals only) ===")]
     [SerializeField] public  bool requiresKill = false;
     [SerializeField] private int  maxHealth    = 50;
 
@@ -21,23 +17,25 @@ public class ResourceNode : MonoBehaviour
     [SerializeField] private int totalAmount  = 200;
     [SerializeField] private int maxGatherers = 8;
 
-    [Tooltip("Drag the visible mesh here. It hides when the node is depleted.")]
-    [SerializeField] private GameObject visualRoot;
-
-    [Tooltip("Seconds before the GameObject is destroyed after depletion.")]
-    [SerializeField] private float destroyDelay = 0.5f;
+    [Tooltip("Drag the visible mesh CHILD here. If empty, auto-finds first child Renderer.")]
+    [SerializeField] public GameObject visualRoot;
 
     // ── Runtime ───────────────────────────────────────────────────────────
     private int            remainingAmount;
     private int            currentHealth;
     private bool           isDead    = false;
-    private bool           depleted  = false;      // prevents double-depletion
-    private List<Villager> gatherers = new List<Villager>();
+    private bool           depleted  = false;
+
+    // CRITICAL FIX: Explicit slot reservation system
+    private Villager[]     gathererSlots;  // fixed-size array for O(1) slot ops
+    private List<Villager> overflowQueue;  // villagers waiting for a slot
 
     protected virtual void Awake()
     {
         remainingAmount = totalAmount;
         currentHealth   = requiresKill ? maxHealth : 1;
+        gathererSlots   = new Villager[maxGatherers];
+        overflowQueue   = new List<Villager>();
 
         if (GetComponent<Collider>() == null &&
             GetComponentInChildren<Collider>() == null)
@@ -45,11 +43,38 @@ public class ResourceNode : MonoBehaviour
             CapsuleCollider cc = gameObject.AddComponent<CapsuleCollider>();
             cc.height = 1f;
             cc.radius = 0.25f;
-            cc.center = new Vector3(0, 0.5f, 0); // lift above ground
+            cc.center = new Vector3(0, 0.5f, 0);
         }
+
+        if (visualRoot == null)
+        {
+            Renderer[] renderers = GetComponentsInChildren<Renderer>(true);
+            if (renderers.Length > 0)
+                visualRoot = renderers[0].gameObject;
+        }
+
+        if (visualRoot == gameObject)
+        {
+            Debug.LogWarning($"[{name}] visualRoot is root GameObject. Consider child 'Visual'.");
+        }
+
+        if (!RegisteredNodes.Contains(this))
+            RegisteredNodes.Add(this);
+
+        if (visualRoot != null && !visualRoot.activeSelf)
+            visualRoot.SetActive(true);
+
+        MinimapSystem.Instance?.TrackResource(this);
+        ResourceCullingManager.Instance?.Register(this);
     }
 
-    // ── Click to inspect ──────────────────────────────────────────────────
+    protected virtual void OnDestroy()
+    {
+        RegisteredNodes.Remove(this);
+        MinimapSystem.Instance?.Untrack(transform);
+        ResourceCullingManager.Instance?.Unregister(this);
+    }
+
     private void OnMouseDown()
     {
         if (UnityEngine.EventSystems.EventSystem.current != null &&
@@ -58,35 +83,91 @@ public class ResourceNode : MonoBehaviour
         ResourceInfoUI.Instance?.Show(this);
     }
 
-    // ── Gatherer management ───────────────────────────────────────────────
+    // ── Slot System ─────────────────────────────────────────────────────
 
-    public bool RequestGather(Villager villager)
+    /// <summary>Try to reserve a slot. Returns slot index (0-7) or -1 if full.</summary>
+    public int ReserveSlot(Villager villager)
     {
-        if (depleted) return false;
-        gatherers.RemoveAll(v => v == null);
-        if (gatherers.Contains(villager)) return true;
+        if (depleted) return -1;
 
-        if (gatherers.Count < maxGatherers)
+        // Check if already has a slot
+        for (int i = 0; i < maxGatherers; i++)
         {
-            // Don't add to list yet — villager adds itself when it actually starts gathering
-            return true;
+            if (gathererSlots[i] == villager) return i;
         }
 
-        ResourceNode next = FindNearest(villager.transform.position, resourceType, this);
-        if (next != null) villager.GatherFrom(next);
-        return false;
-}
+        // Find empty slot
+        for (int i = 0; i < maxGatherers; i++)
+        {
+            if (gathererSlots[i] == null)
+            {
+                gathererSlots[i] = villager;
+                return i;
+            }
+        }
 
-// Called by Villager when it physically starts gathering
-    public void ConfirmGathering(Villager villager)
-    {
-        if (!gatherers.Contains(villager))
-            gatherers.Add(villager);
+        // Full — add to overflow
+        if (!overflowQueue.Contains(villager))
+            overflowQueue.Add(villager);
+
+        return -1;
     }
 
-    public void ReleaseGatherer(Villager v) => gatherers.Remove(v);
+    /// <summary>Release a slot when villager leaves or dies.</summary>
+    public void ReleaseSlot(Villager villager)
+    {
+        for (int i = 0; i < maxGatherers; i++)
+        {
+            if (gathererSlots[i] == villager)
+            {
+                gathererSlots[i] = null;
+                // Promote overflow villager if any
+                PromoteFromOverflow();
+                return;
+            }
+        }
+        overflowQueue.Remove(villager);
+    }
 
-    // ── Gather ────────────────────────────────────────────────────────────
+    private void PromoteFromOverflow()
+    {
+        for (int i = overflowQueue.Count - 1; i >= 0; i--)
+        {
+            Villager v = overflowQueue[i];
+            if (v == null)
+            {
+                overflowQueue.RemoveAt(i);
+                continue;
+            }
+            int slot = ReserveSlot(v);
+            if (slot >= 0)
+            {
+                overflowQueue.RemoveAt(i);
+                v.OnSlotPromoted(this, slot);
+                break;
+            }
+        }
+    }
+
+    public bool HasAvailableSlot()
+    {
+        if (depleted) return false;
+        for (int i = 0; i < maxGatherers; i++)
+            if (gathererSlots[i] == null) return true;
+        return false;
+    }
+
+    public int ActiveGathererCount()
+    {
+        int count = 0;
+        for (int i = 0; i < maxGatherers; i++)
+            if (gathererSlots[i] != null) count++;
+        return count;
+    }
+
+    public int OverflowCount => overflowQueue.Count;
+
+    // ── Gathering & Combat ────────────────────────────────────────────
 
     public int Gather(int amount)
     {
@@ -102,16 +183,14 @@ public class ResourceNode : MonoBehaviour
         return got;
     }
 
-    // ── Animal combat ─────────────────────────────────────────────────────
-
     public void TakeDamage(int amount)
     {
-        if (!requiresKill || isDead) return;
+        if (!requiresKill || isDead || depleted) return;
         currentHealth -= amount;
         if (currentHealth <= 0)
         {
             currentHealth = 0;
-            isDead        = true;
+            isDead = true;
             OnKilled();
         }
     }
@@ -127,41 +206,85 @@ public class ResourceNode : MonoBehaviour
         if (depleted) return;
         depleted = true;
 
-        // Disable the entire GameObject immediately
-        gameObject.SetActive(false);
+        // Disable collider
+        var col = GetComponent<Collider>();
+        if (col != null) col.enabled = false;
+        foreach (var c in GetComponentsInChildren<Collider>())
+            c.enabled = false;
+
+        // Hide visuals
+        if (visualRoot != null)
+        {
+            foreach (var r in visualRoot.GetComponentsInChildren<Renderer>())
+                r.enabled = false;
+        }
 
         ResourceInfoUI.Instance?.HideIfShowing(this);
 
-        foreach (Villager v in gatherers)
+        // Release all gatherers and redirect
+        List<Villager> toRedirect = new List<Villager>();
+        for (int i = 0; i < maxGatherers; i++)
+        {
+            if (gathererSlots[i] != null)
+            {
+                toRedirect.Add(gathererSlots[i]);
+                gathererSlots[i] = null;
+            }
+        }
+        foreach (var v in overflowQueue)
+        {
+            if (v != null && !toRedirect.Contains(v))
+                toRedirect.Add(v);
+        }
+        overflowQueue.Clear();
+
+        foreach (Villager v in toRedirect)
         {
             if (v == null) continue;
-            ResourceNode next = FindNearest(v.transform.position, resourceType, this);
+            ResourceNode next = FindNearest(v.transform.position, resourceType, this, 50f);
             if (next != null) v.GatherFrom(next);
         }
-        gatherers.Clear();
 
+        gameObject.SetActive(false);
         Destroy(gameObject, 0.3f);
     }
 
-    // ── Static finder ─────────────────────────────────────────────────────
+    // ── Finders ─────────────────────────────────────────────────────────
 
-    public static ResourceNode FindNearest(
-        Vector3 pos, ResourceType type, ResourceNode exclude = null)
+    public static ResourceNode FindNearest(Vector3 pos, ResourceType type, ResourceNode exclude = null, float maxDist = float.MaxValue)
     {
-        ResourceNode best    = null;
-        float        bestDist = float.MaxValue;
+        ResourceNode best = null;
+        float bestDist = float.MaxValue;
 
-        foreach (ResourceNode n in FindObjectsOfType<ResourceNode>())
+        foreach (ResourceNode n in RegisteredNodes)
         {
-            if (n == exclude || n.depleted) continue;
+            if (n == null || n == exclude || n.depleted || n.isDead) continue;
             if (n.resourceType != type) continue;
+            if (!n.HasAvailableSlot()) continue; // CRITICAL: only find resources with open slots
             float d = Vector3.Distance(pos, n.transform.position);
+            if (d > maxDist) continue;
             if (d < bestDist) { bestDist = d; best = n; }
         }
         return best;
     }
 
-    // ── Properties ────────────────────────────────────────────────────────
+    public static ResourceNode FindNearestAny(Vector3 pos, float maxDist, ResourceNode exclude = null)
+    {
+        ResourceNode best = null;
+        float bestDist = float.MaxValue;
+
+        foreach (ResourceNode n in RegisteredNodes)
+        {
+            if (n == null || n == exclude || n.depleted) continue;
+            if (!n.HasAvailableSlot()) continue;
+            float d = Vector3.Distance(pos, n.transform.position);
+            if (d > maxDist) continue;
+            if (d < bestDist) { bestDist = d; best = n; }
+        }
+        return best;
+    }
+
+    // ── Properties ────────────────────────────────────────────────────
     public ResourceType ResourceType    => resourceType;
     public int          RemainingAmount => remainingAmount;
     public int          TotalAmount     => totalAmount;
@@ -170,6 +293,7 @@ public class ResourceNode : MonoBehaviour
     public bool         RequiresKill    => requiresKill;
     public bool         IsKilled        => isDead || !requiresKill;
     public bool         IsEmpty         => depleted || remainingAmount <= 0;
-    public int          GathererCount   => gatherers.Count;
+    public int          GathererCount   => ActiveGathererCount();
     public int          MaxGatherers    => maxGatherers;
+    public GameObject   VisualRoot      => visualRoot;
 }

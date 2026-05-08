@@ -25,6 +25,7 @@ public class UnitInfoUI : MonoBehaviour
     [SerializeField] private TMP_Text   totalCountText;
     [SerializeField] private Transform  typeListContainer;
     [SerializeField] private GameObject typeLinePrefab;
+    [SerializeField] private UnityEngine.UI.RawImage portraitDisplay;
 
     private Unit             trackedUnit;
     private List<GameObject> typeLines = new List<GameObject>();
@@ -49,6 +50,7 @@ public class UnitInfoUI : MonoBehaviour
         ResourceInfoUI.Instance?.Hide();
         if (unit == null) return;
         trackedUnit = unit;
+        if (portraitDisplay != null) portraitDisplay.gameObject.SetActive(true);
 
         singleGroup?.SetActive(true);
         multiGroup?.SetActive(false);
@@ -71,6 +73,7 @@ public class UnitInfoUI : MonoBehaviour
     public void ShowMultiple(List<Unit> units)
     {
         trackedUnit = null;
+        if (portraitDisplay != null) portraitDisplay.gameObject.SetActive(false);
         singleGroup?.SetActive(false);
         multiGroup?.SetActive(true);
         ClearTypeLines();
@@ -113,6 +116,7 @@ public class UnitInfoUI : MonoBehaviour
     public void Hide()
     {
         trackedUnit = null;
+        if (portraitDisplay != null) portraitDisplay.gameObject.SetActive(false);
         BuildMenuUI.Instance?.Hide();
         if (panel != null) panel.SetActive(false);
         ClearTypeLines();

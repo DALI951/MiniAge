@@ -19,11 +19,12 @@ public class UnitSelectionBox : MonoBehaviour
     [SerializeField] RectTransform boxVisual;
     [SerializeField] Canvas        uiCanvas;
     [SerializeField] float         dragThreshold = 8f;
+    [SerializeField] private RectTransform bottomBar;
 
-    Rect    selectionBox;
     Vector2 startPosition;      // screen-space start of drag
     Vector2 endPosition;
     bool    isDragging       = false;
+    bool    hasDragOrigin    = false; // replaces checking startPosition == Vector2.zero (ambiguous at screen origin)
     bool    startOnUI        = false; // was the click origin on a UI element?
     public static UnitSelectionBox Instance { get; private set; }
     public bool JustFinishedDrag { get; private set; }
@@ -59,16 +60,16 @@ public class UnitSelectionBox : MonoBehaviour
             return;
         }
 
-        if (isDown && !wasMouseDown == false && !isDragging && startPosition == Vector2.zero)
+        if (isDown && !isDragging && !hasDragOrigin && !IsMouseOverBottomPanel())
         {
+            hasDragOrigin = true;
             startPosition = Input.mousePosition;
             endPosition   = startPosition;
-            selectionBox  = new Rect();
             startOnUI     = EventSystem.current != null &&
                             EventSystem.current.IsPointerOverGameObject();
         }
 
-        if (isDown && !startOnUI)
+        if (isDown && !startOnUI && !IsMouseOverBottomPanel())
         {
             endPosition = Input.mousePosition;
 
@@ -82,10 +83,6 @@ public class UnitSelectionBox : MonoBehaviour
             if (isDragging)
             {
                 DrawVisual();
-                selectionBox.xMin = Mathf.Min(startPosition.x, endPosition.x);
-                selectionBox.xMax = Mathf.Max(startPosition.x, endPosition.x);
-                selectionBox.yMin = Mathf.Min(startPosition.y, endPosition.y);
-                selectionBox.yMax = Mathf.Max(startPosition.y, endPosition.y);
             }
         }
 
@@ -130,16 +127,7 @@ public class UnitSelectionBox : MonoBehaviour
             Mathf.Abs(s.x - e.x),
             Mathf.Abs(s.y - e.y));
     }
-
-    // ── Build screen-space Rect ───────────────────────────────────────────
-    void DrawSelection()
-    {
-        selectionBox.xMin = Mathf.Min(startPosition.x, endPosition.x);
-        selectionBox.xMax = Mathf.Max(startPosition.x, endPosition.x);
-        selectionBox.yMin = Mathf.Min(startPosition.y, endPosition.y);
-        selectionBox.yMax = Mathf.Max(startPosition.y, endPosition.y);
-    }
-
+    
     // ── Select units inside the rect ──────────────────────────────────────
     void SelectUnits()
     {
@@ -154,20 +142,15 @@ public class UnitSelectionBox : MonoBehaviour
             Mathf.Abs(endPosition.x - startPosition.x),
             Mathf.Abs(endPosition.y - startPosition.y));
 
-        Debug.Log($"[SelectionBox] Rect: {currentRect}");
-
         var list = UnitSelectionManager.Instance?.allUnitsList;
 
         if (list == null)
         { Debug.LogError("[SelectionBox] UnitSelectionManager list is NULL"); return; }
 
-        Debug.Log($"[SelectionBox] Checking {list.Count} units");
-
         foreach (Unit unit in list)
         {
             if (unit == null) continue;
             Vector3 sp = myCam.WorldToScreenPoint(unit.transform.position);
-            Debug.Log($"[SelectionBox] Unit {unit.UnitName} screenPos={sp}, inRect={currentRect.Contains(new Vector2(sp.x, sp.y))}");
             if (sp.z < 0) continue;
             if (currentRect.Contains(new Vector2(sp.x, sp.y)))
                 SelectionManager.Instance?.AddUnitToSelection(unit);
@@ -180,11 +163,21 @@ public class UnitSelectionBox : MonoBehaviour
     void CancelDrag()
     {
         isDragging    = false;
+        hasDragOrigin = false;
         startOnUI     = false;
         startPosition = Vector2.zero;
         endPosition   = Vector2.zero;
-        selectionBox  = new Rect();
         if (boxVisual != null) boxVisual.gameObject.SetActive(false);
         StartCoroutine(ResetDragFlag());
+    }
+    private bool IsMouseOverBottomPanel()
+    {
+        if (bottomBar == null) return false;
+        Vector3[] corners = new Vector3[4];
+        bottomBar.GetWorldCorners(corners);
+        // corners[0] = bottom-left, corners[1] = top-left in world space
+        // Convert to screen space
+        float panelScreenTop = RectTransformUtility.WorldToScreenPoint(null, corners[1]).y;
+        return Input.mousePosition.y < panelScreenTop;
     }
 }

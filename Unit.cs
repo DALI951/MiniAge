@@ -1,14 +1,15 @@
 using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.EventSystems;
+using System.Collections.Generic;
 using System.Collections;
 
-/// <summary>
-/// Unit base class — Feature 3: position clamped to MapBoundary every LateUpdate.
-/// </summary>
 [RequireComponent(typeof(NavMeshAgent))]
 public class Unit : MonoBehaviour
 {
+    [Header("Ownership")]
+    [SerializeField] private int ownerPlayerId = 0;
+
     [Header("Stats")]
     [SerializeField] protected string unitName        = "Unit";
     [SerializeField] protected string unitType        = "Unknown";
@@ -35,7 +36,17 @@ public class Unit : MonoBehaviour
     private   float        lastAttackTime = -99f;
     private   const float  DOUBLE_CLICK   = 0.3f;
     protected Unit         attackTarget;
-    public string huntingUnitName = ""; // remembers what type we're attacking
+    public string huntingUnitName = "";
+    private List<Vector3> waypoints = new List<Vector3>();
+    private Coroutine waypointCoroutine;
+    public bool processingWaypoints = false;
+    private bool isDying = false;
+    private Renderer[] allRenderers;
+    private Building buildingTarget = null;
+
+    // Combat AI throttling
+    private float nextTargetSearchTime = 0f;
+    private const float TARGET_SEARCH_INTERVAL = 0.5f;
 
     protected virtual void Awake()
     {
@@ -58,17 +69,34 @@ public class Unit : MonoBehaviour
             cc.center = new Vector3(0, 0.5f, 0);
         }
 
+        allRenderers = GetComponentsInChildren<Renderer>(true);
         UnitSelectionManager.Instance?.Register(this);
+        MinimapSystem.Instance?.TrackUnit(this);
     }
 
     protected virtual void Start() { }
 
     protected virtual void Update()
     {
-        if (attackTarget != null) ChaseAndAttack();
+        if (isDying) return;
+
+        // Throttled target search — not every frame
+        if (!string.IsNullOrEmpty(huntingUnitName) && attackTarget == null)
+        {
+            if (Time.time >= nextTargetSearchTime)
+            {
+                nextTargetSearchTime = Time.time + TARGET_SEARCH_INTERVAL;
+                FindNextTarget();
+            }
+        }
+
+        if (attackTarget != null)
+            ChaseAndAttack();
+
+        if (buildingTarget != null)
+            ChaseAndAttackBuilding();
     }
 
-    // Feature 3: clamp position every frame so units never leave the map
     private void LateUpdate()
     {
         if (MapBoundary.Instance == null) return;
@@ -79,6 +107,15 @@ public class Unit : MonoBehaviour
             transform.position = clamped;
             if (agent != null && agent.isOnNavMesh)
                 agent.Warp(clamped);
+        }
+
+        // Hide enemy units not currently in the player's sight radius
+        if (ownerPlayerId != PlayerColorManager.LocalPlayerIndex)
+        {
+            bool vis = FogOfWar.Instance == null || FogOfWar.Instance.IsVisible(transform.position);
+            if (allRenderers != null)
+                foreach (Renderer r in allRenderers)
+                    if (r != null) r.enabled = vis;
         }
     }
 
@@ -97,10 +134,7 @@ public class Unit : MonoBehaviour
         if (EventSystem.current != null &&
             EventSystem.current.IsPointerOverGameObject()) return;
 
-        // If held for more than 0.2s it was a drag — don't select
         if (Time.unscaledTime - mouseDownTime > 0.2f) return;
-
-        // If drag-box just finished — don't select
         if (UnitSelectionBox.Instance != null && UnitSelectionBox.Instance.JustFinishedDrag)
             return;
 
@@ -115,16 +149,13 @@ public class Unit : MonoBehaviour
         else
             SelectionManager.Instance?.SelectSingleUnit(this);
     }
-    
+
     // ── Combat ─────────────────────────────────────────────────────────
     private void ChaseAndAttack()
     {
-        if (attackTarget == null) return;
-
-        // Target died — find next of same type nearby
-        if (attackTarget.gameObject == null)
+        if (attackTarget == null || !attackTarget.gameObject.activeInHierarchy)
         {
-            FindNextTarget();
+            attackTarget = null;
             return;
         }
 
@@ -142,7 +173,34 @@ public class Unit : MonoBehaviour
         else agent.SetDestination(attackTarget.transform.position);
     }
 
-    /// <summary>Find nearest enemy of same type within radius after target dies.</summary>
+    private void ChaseAndAttackBuilding()
+    {
+        if (attackTarget != null) return;
+        if (buildingTarget == null || !buildingTarget.gameObject.activeInHierarchy)
+        {
+            buildingTarget = null;
+            return;
+        }
+        float dist = Vector3.Distance(transform.position, buildingTarget.transform.position);
+        if (dist <= attackRange + 1.5f)
+        {
+            agent.ResetPath();
+            transform.LookAt(new Vector3(
+                buildingTarget.transform.position.x,
+                transform.position.y,
+                buildingTarget.transform.position.z));
+            if (Time.time - lastAttackTime >= attackCooldown)
+            {
+                lastAttackTime = Time.time;
+                buildingTarget.TakeDamage(attackDamage);
+            }
+        }
+        else
+        {
+            agent.SetDestination(buildingTarget.transform.position);
+        }
+    }
+
     public void FindNextTarget()
     {
         attackTarget = null;
@@ -157,6 +215,7 @@ public class Unit : MonoBehaviour
         {
             Unit u = c.GetComponentInParent<Unit>();
             if (u == null || u == this) continue;
+            if (!IsEnemy(u)) continue;
             if (u.UnitName != huntingUnitName) continue;
 
             float d = Vector3.Distance(transform.position, u.transform.position);
@@ -164,16 +223,13 @@ public class Unit : MonoBehaviour
         }
 
         attackTarget = closest;
-
-        // Nothing left to hunt — clear hunt order
         if (attackTarget == null)
             huntingUnitName = "";
     }
 
     protected virtual void PerformAttack(Unit target)
     {
-        // GetComponent<Animator>()?.SetTrigger("Attack");
-        target.TakeDamage(attackDamage);
+        target.TakeDamage(attackDamage, this);
     }
 
     public void SetAttackTarget(Unit t) { attackTarget = t; }
@@ -204,8 +260,6 @@ public class Unit : MonoBehaviour
         }
     }
 
-    public virtual void Select() => Select(Color.white);
-
     public virtual void Deselect()
     {
         isSelected = false;
@@ -216,35 +270,52 @@ public class Unit : MonoBehaviour
 
     // ── Movement ───────────────────────────────────────────────────────
     public void SetMoveSpeed(float s) { if (agent != null) agent.speed = s; }
-    public void RestoreSpeed()        { if (agent != null) agent.speed = baseSpeed; }
+    public virtual void RestoreSpeed() { if (agent != null) agent.speed = baseSpeed; }
 
     // ── Health ─────────────────────────────────────────────────────────
-    public virtual void TakeDamage(int amount)
+    public virtual void TakeDamage(int amount, Unit damageSource = null)
     {
+        if (isDying) return;
         currentHealth -= amount;
         if (currentHealth <= 0) { Die(); return; }
 
-        // Retaliate if idle
         if (attackTarget == null)
-            attackTarget = FindAttacker();
+        {
+            if (damageSource != null && IsEnemy(damageSource))
+                attackTarget = damageSource;
+            else
+                attackTarget = FindAttacker();
+        }
 
-        // Alert nearby allies of same type to help
-        AlertNearbyAllies();
+        Unit threatForAllies = attackTarget;
+        if (threatForAllies == null && damageSource != null && IsEnemy(damageSource))
+            threatForAllies = damageSource;
+        if (threatForAllies == null)
+            threatForAllies = FindAttacker();
+
+        AlertNearbyAllies(threatForAllies);
     }
+
+    public bool IsEnemy(Unit other)
+    {
+        if (other == null || other == this) return false;
+        return other.ownerPlayerId != ownerPlayerId;
+    }
+
+    public void SetOwner(int playerId) { ownerPlayerId = playerId; }
 
     private Unit FindAttacker()
     {
-        // Find closest unit that isn't the same type as us
-        float    radius = 15f;
-        Collider[] hits = Physics.OverlapSphere(transform.position, radius);
-        Unit      best  = null;
-        float     bestD = float.MaxValue;
+        float      radius = 15f;
+        Collider[] hits   = Physics.OverlapSphere(transform.position, radius);
+        Unit       best   = null;
+        float      bestD  = float.MaxValue;
 
         foreach (Collider c in hits)
         {
             Unit u = c.GetComponentInParent<Unit>();
             if (u == null || u == this) continue;
-            if (u.UnitName == unitName) continue; // skip same type
+            if (!IsEnemy(u)) continue;
 
             float d = Vector3.Distance(transform.position, u.transform.position);
             if (d < bestD) { bestD = d; best = u; }
@@ -252,31 +323,32 @@ public class Unit : MonoBehaviour
         return best;
     }
 
-    private void AlertNearbyAllies()
+    private void AlertNearbyAllies(Unit threat)
     {
-        float    radius = 12f;
-        Collider[] hits = Physics.OverlapSphere(transform.position, radius);
+        if (threat == null) return;
+
+        float      radius = 12f;
+        Collider[] hits   = Physics.OverlapSphere(transform.position, radius);
 
         foreach (Collider c in hits)
         {
             Unit ally = c.GetComponentInParent<Unit>();
             if (ally == null || ally == this) continue;
-            if (ally.UnitName != unitName) continue; // only same type helps
-            if (ally.attackTarget != null) continue;  // already fighting
+            if (ally.UnitName != unitName) continue;
+            if (ally.attackTarget != null) continue;
 
-            // Find the closest enemy near us for the ally to attack
-            Unit enemy = FindAttacker();
-            if (enemy != null)
-            {
-                ally.attackTarget    = enemy;
-                ally.huntingUnitName = enemy.UnitName;
-            }
+            ally.attackTarget    = threat;
+            ally.huntingUnitName = threat.UnitName;
+            ally.buildingTarget  = null;
         }
     }
 
     protected virtual void Die()
     {
-        // Notify nearby units that were targeting this unit to find a new target
+        if (isDying) return;
+        isDying = true;
+
+        // Notify nearby units targeting this one
         Collider[] nearby = Physics.OverlapSphere(transform.position, 20f);
         foreach (Collider c in nearby)
         {
@@ -287,56 +359,99 @@ public class Unit : MonoBehaviour
         }
 
         UnitSelectionManager.Instance?.Unregister(this);
+        MinimapSystem.Instance?.Untrack(transform);
         if (isSelected) UnitInfoUI.Instance?.Hide();
+
+        // Stop agent before destroying
+        if (agent != null && agent.isOnNavMesh)
+            agent.isStopped = true;
+        buildingTarget = null;
+        if (ownerPlayerId == PlayerColorManager.LocalPlayerIndex)
+            ResourceManager.Instance?.RemovePopulation(1);
+        else
+            EnemyAI.Instance?.RemovePopulation(1);
         Destroy(gameObject);
     }
+
     public void SetHuntTarget(string unitName)
     {
         huntingUnitName = unitName;
     }
-    // Add this field to track destination
-private Vector3 currentDestination = Vector3.zero;
-// Add this field to track destination
-public virtual void MoveTo(Vector3 dest)
-{
-    // Store destination for flag tracking
-    currentDestination = dest;
-    
-    // Clamp destination to map
-    if (MapBoundary.Instance != null)
-        dest = MapBoundary.Instance.Clamp(dest);
 
-    ClearAttackTarget();
-    if (agent != null && agent.isOnNavMesh)
-        agent.SetDestination(dest);
-}
-
-
-// Add this coroutine to Unit.cs:
-    private IEnumerator CheckArrival(Vector3 destination)
+    public virtual void MoveTo(Vector3 dest)
     {
-        yield return new WaitForSeconds(0.5f);
-        
-        while (agent != null && agent.isOnNavMesh && agent.pathPending)
-        {
-            yield return null;
-        }
-        
-        if (agent == null || !agent.isOnNavMesh) yield break;
-        
-        // Wait until unit arrives at destination
-        while (agent.remainingDistance > agent.stoppingDistance)
-        {
-            yield return new WaitForSeconds(0.1f);
-            if (agent == null || !agent.isOnNavMesh) yield break;
-        }
-        
-        // Unit arrived - this could trigger flag removal if needed
-        Debug.Log($"[Unit] {gameObject.name} arrived at destination");
+        if (MapBoundary.Instance != null)
+            dest = MapBoundary.Instance.Clamp(dest);
+
+        ClearAttackTarget();
+
+        if (agent == null || !agent.isOnNavMesh)
+            return;
+
+        agent.SetDestination(dest);
     }
 
+    private IEnumerator ProcessWaypoints()
+    {
+        processingWaypoints = true;
+        while (waypoints.Count > 0)
+        {
+            Vector3 target = waypoints[0];
+
+            if (agent != null && agent.isOnNavMesh && agent.destination != target)
+                agent.SetDestination(target);
+
+            while (true)
+            {
+                if (agent == null || !agent.isOnNavMesh) break;
+                if (!agent.pathPending && agent.remainingDistance <= agent.stoppingDistance + 0.5f)
+                    break;
+                yield return null;
+            }
+
+            waypoints.RemoveAt(0);
+        }
+        processingWaypoints = false;
+        waypointCoroutine = null;
+    }
+
+    public void AddWaypoint(Vector3 point)
+    {
+        if (MapBoundary.Instance != null)
+            point = MapBoundary.Instance.Clamp(point);
+        waypoints.Add(point);
+        if (!processingWaypoints)
+            waypointCoroutine = StartCoroutine(ProcessWaypoints());
+    }
+
+    public void SetFirstWaypoint(Vector3 point)
+    {
+        if (MapBoundary.Instance != null)
+            point = MapBoundary.Instance.Clamp(point);
+
+        waypoints.Clear();
+        waypoints.Add(point);
+
+        MoveTo(point);
+
+        if (!processingWaypoints)
+            waypointCoroutine = StartCoroutine(ProcessWaypoints());
+    }
+
+    public void ClearWaypoints()
+    {
+        waypoints.Clear();
+        processingWaypoints = false;
+        if (waypointCoroutine != null)
+        {
+            StopCoroutine(waypointCoroutine);
+            waypointCoroutine = null;
+        }
+    }
 
     // ── Properties ─────────────────────────────────────────────────────
+    public void   SetBuildingTarget(Building b) { buildingTarget = b; attackTarget = null; }
+    public bool   HasActiveTarget  => attackTarget != null || buildingTarget != null;
     public string UnitName        => unitName;
     public string UnitType        => unitType;
     public string UnitDescription => unitDescription;
@@ -344,4 +459,5 @@ public virtual void MoveTo(Vector3 dest)
     public int    CurrentHealth   => currentHealth;
     public float  BaseSpeed       => baseSpeed;
     public bool   IsSelected      => isSelected;
+    public int    OwnerPlayerId   => ownerPlayerId;
 }

@@ -39,12 +39,6 @@ public class BuildMenuUI : MonoBehaviour
         buildPanel?.SetActive(false);
     }
 
-    private void Start()
-    {
-        // Auto-create buttons for each building entry
-        // (you can also wire buttons manually in Inspector)
-    }
-
     public void Show()
     {
         buildPanel?.SetActive(true);

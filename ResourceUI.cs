@@ -15,6 +15,7 @@ public class ResourceUI : MonoBehaviour
     [SerializeField] private TMP_Text foodText;
     [SerializeField] private TMP_Text woodText;
     [SerializeField] private TMP_Text goldText;
+    [SerializeField] private TMP_Text populationText;
 
     // ─── Unity Lifecycle ─────────────────────────────────────────────────
     private void Awake()
@@ -31,5 +32,9 @@ public class ResourceUI : MonoBehaviour
         if (foodText) foodText.text = $"Food: {food}";
         if (woodText) woodText.text = $"Wood: {wood}";
         if (goldText) goldText.text = $"Gold: {gold}";
+    }
+    public void RefreshPopulation(int current, int max)
+    {
+        if (populationText) populationText.text = $"Pop: {current}/{max}";
     }
 }

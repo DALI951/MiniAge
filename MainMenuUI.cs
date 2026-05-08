@@ -77,7 +77,9 @@ public class MainMenuUI : MonoBehaviour
         { SetHostStatus("NetworkManager missing!"); return; }
 
         RTSNetworkManager.Instance.maxConnections = max;
-        RTSNetworkManager.Instance.requiredPlayers = max;
+        // Minimum viable lobby: allow starting once 2 players are ready,
+        // even if the host set a larger max connection limit.
+        RTSNetworkManager.Instance.requiredPlayers = 2;
         RTSNetworkManager.Instance.StartHost();
 
         if (startHostButton != null) startHostButton.interactable = false;
@@ -91,9 +93,6 @@ public class MainMenuUI : MonoBehaviour
         if (ipDisplayText != null)
             ipDisplayText.text = $"Your IP:  {ip}";
         SetHostStatus("✅ Server running. Share your IP above.");
-        
-        // Show lobby after hosting starts
-        LobbyUI.Instance?.ShowLobby();
     }
 
     public void OnBackFromHost()
@@ -156,13 +155,6 @@ public class MainMenuUI : MonoBehaviour
     }
     public void OnStartSinglePlayer()
     {
-        GameModeManager.Instance?.StartSinglePlayer();
-    }
-
-    public void ShowSinglePlayerPanel()
-    {
-        mainPanel?.SetActive(false);
-        // For single player, we can directly start the game
         GameModeManager.Instance?.StartSinglePlayer();
     }
 

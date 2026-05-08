@@ -12,11 +12,10 @@ public class ConstructionSite : MonoBehaviour
     [Header("Settings")]
     [SerializeField] private float buildTime      = 10f;
     [SerializeField] private GameObject completedPrefab;
-    [SerializeField] private GameObject siteVisual;   // ghost/scaffold visual
 
-    private float    progress     = 0f;
-    private bool     isComplete   = false;
-    private Villager builder      = null;
+    private float    progress       = 0f;
+    private bool     isComplete     = false;
+    private int      pendingOwnerId = -1;
     private List<Villager> builders = new List<Villager>();
     public void Initialize(GameObject prefab, float time)
     {
@@ -28,6 +27,8 @@ public class ConstructionSite : MonoBehaviour
     {
         if (!builders.Contains(v))
             builders.Add(v);
+        if (pendingOwnerId < 0 && v != null)
+            pendingOwnerId = v.OwnerPlayerId;
     }
 
     private void Update()
@@ -62,6 +63,8 @@ public class ConstructionSite : MonoBehaviour
                 transform.position, transform.rotation);
             int layer = LayerMask.NameToLayer("Building");
             SetLayerRecursive(built, layer);
+            if (pendingOwnerId >= 0 && built.TryGetComponent(out Building b))
+                b.SetOwner(pendingOwnerId);
         }
         foreach (Villager b in builders)
             if (b != null) b.OnBuildingComplete();

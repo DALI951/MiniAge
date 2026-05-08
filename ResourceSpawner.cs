@@ -1,11 +1,17 @@
 using UnityEngine;
 using UnityEngine.AI;
+using System.Collections;
+using System.Collections.Generic;
 
 /// <summary>
-/// ResourceSpawner — places Trees, Mines, Animals at game start.
-///
-/// Fix Bug 4: each candidate position is tested against already-placed
-/// nodes using a minimum separation radius before instantiating.
+/// ResourceSpawner v6 — FIXED for resources touching buildings.
+/// 
+/// KEY FIXES:
+/// 1. Waits 1 frame for BuildingSpawner to finish, then finds buildings.
+/// 2. Spawns resources at building positions + small radius (5-15 units).
+/// 3. Resources spawn INWARD from buildings toward center.
+/// 4. Extra clusters near buildings so player sees resources immediately.
+/// 5. Phase 2 scatter fills rest of map.
 /// </summary>
 public class ResourceSpawner : MonoBehaviour
 {
@@ -14,106 +20,220 @@ public class ResourceSpawner : MonoBehaviour
     [SerializeField] private GameObject minePrefab;
     [SerializeField] private GameObject animalPrefab;
 
-    [Header("Map")]
-    [SerializeField] private float mapHalfSize   = 23f;
-    [SerializeField] private float edgeMargin    = 3f;
+    [Header("Map (auto-reads from MapBoundary if present)")]
+    [SerializeField] private float mapHalfSize = 500f;
 
-    [Header("Global counts")]
-    [SerializeField] private int totalTrees   = 25;
-    [SerializeField] private int totalMines   = 12;
-    [SerializeField] private int totalAnimals = 15;
+    [Header("Building-Adjacent Spawning")]
+    [Tooltip("Resources spawn this close to buildings. 3 = touching/near buildings.")]
+    [SerializeField] private float buildingSpawnRadius = 8f;
+    [Tooltip("Min distance from building. 2 = very close.")]
+    [SerializeField] private float buildingSpawnMin = 2f;
+    [Tooltip("Resources per building cluster.")]
+    [SerializeField] private int treesNearBuilding = 3;
+    [SerializeField] private int minesNearBuilding = 1;
+    [SerializeField] private int animalsNearBuilding = 2;
 
-    [Header("Guaranteed near each spawn point")]
-    [SerializeField] private float nearSpawnRadius = 10f;
-    [SerializeField] private int   treesPerSpawn   = 2;
-    [SerializeField] private int   minesPerSpawn   = 1;
-    [SerializeField] private int   animalsPerSpawn = 1;
+    [Header("Global Density")]
+    [SerializeField] private int treesPer100Units = 4;
+    [SerializeField] private int minesPer100Units = 2;
+    [SerializeField] private int animalsPer100Units = 3;
 
-    [Header("Spacing (fix overlap)")]
-    [SerializeField] private float minNodeSeparation = 2.5f; // minimum distance between any two nodes
-    [SerializeField] private float spawnClearance    = 4f;   // clear radius around each spawn point
+    [Header("Spacing")]
+    [SerializeField] private float minNodeSeparation = 2f;
+    [SerializeField] private float edgeMarginFraction = 0.05f;
 
-    private SpawnAreaManager spawnArea;
+    [Header("Placement")]
+    [SerializeField] private int maxAttempts = 100;
+    [SerializeField] private float navMeshMaxDistance = 5f;
+
+    // Runtime
+    private List<Vector3> placedPositions = new List<Vector3>();
+    private float minNodeSeparationSqr;
+    private float edgeMargin;
+    private float limit;
+    private int spawnedTrees, spawnedMines, spawnedAnimals;
+    private int failedTrees, failedMines, failedAnimals;
 
     private void Start()
     {
-        spawnArea = FindObjectOfType<SpawnAreaManager>();
+        if (MapBoundary.Instance != null)
+            mapHalfSize = MapBoundary.Instance.HalfSize;
 
-        // Phase 1 — guaranteed clusters near spawn points
+        edgeMargin = mapHalfSize * edgeMarginFraction;
+        limit = mapHalfSize - edgeMargin;
+        minNodeSeparationSqr = minNodeSeparation * minNodeSeparation;
+
+        // Wait one frame for BuildingSpawner to create buildings
+        StartCoroutine(SpawnAfterDelay());
+    }
+
+    private IEnumerator SpawnAfterDelay()
+    {
+        yield return null; // Wait 1 frame for buildings to exist
+
+        // Find all player buildings
+        List<Vector3> buildingPositions = new List<Vector3>();
+        foreach (var b in FindObjectsOfType<Building>())
+        {
+            if (b != null) buildingPositions.Add(b.transform.position);
+        }
+
+        // Also get spawn positions as fallback
+        SpawnAreaManager spawnArea = FindObjectOfType<SpawnAreaManager>();
+        List<Vector3> spawnPositions = new List<Vector3>();
         if (spawnArea != null)
         {
             for (int i = 0; i < 10; i++)
             {
                 Vector3 sp = spawnArea.GetSpawnPosition(i);
-                SpawnCluster(treePrefab,   treesPerSpawn,   sp, nearSpawnRadius, spawnClearance);
-                SpawnCluster(minePrefab,   minesPerSpawn,   sp, nearSpawnRadius, spawnClearance);
-                SpawnCluster(animalPrefab, animalsPerSpawn, sp, nearSpawnRadius, spawnClearance);
+                sp.x = Mathf.Clamp(sp.x, -limit, limit);
+                sp.z = Mathf.Clamp(sp.z, -limit, limit);
+                spawnPositions.Add(sp);
             }
         }
 
-        // Phase 2 — scatter rest of map
-        SpawnRandom(treePrefab,   totalTrees);
-        SpawnRandom(minePrefab,   totalMines);
-        SpawnRandom(animalPrefab, totalAnimals);
+        float mapArea = (mapHalfSize * 2f) * (mapHalfSize * 2f);
+        float scaleFactor = mapArea / 10000f;
+
+        int totalTrees = Mathf.RoundToInt(treesPer100Units * scaleFactor);
+        int totalMines = Mathf.RoundToInt(minesPer100Units * scaleFactor);
+        int totalAnimals = Mathf.RoundToInt(animalsPer100Units * scaleFactor);
+
+        Debug.Log($"[ResourceSpawner] Map: {mapHalfSize*2}×{mapHalfSize*2} | " +
+                  $"Buildings found: {buildingPositions.Count} | " +
+                  $"Building radius: {buildingSpawnRadius:F1} | " +
+                  $"Targets: {totalTrees}T/{totalMines}M/{totalAnimals}A");
+
+        // ── Phase 1: Spawn resources RIGHT NEXT to each building ──────────
+        foreach (Vector3 buildingPos in buildingPositions)
+        {
+            // Direction from building toward map center
+            Vector3 toCenter = (Vector3.zero - buildingPos).normalized;
+            if (toCenter.sqrMagnitude < 0.001f) toCenter = Vector3.forward;
+
+            SpawnNearPoint(treePrefab,   treesNearBuilding,   buildingPos, toCenter, buildingSpawnMin, buildingSpawnRadius);
+            SpawnNearPoint(minePrefab,   minesNearBuilding,   buildingPos, toCenter, buildingSpawnMin, buildingSpawnRadius);
+            SpawnNearPoint(animalPrefab, animalsNearBuilding, buildingPos, toCenter, buildingSpawnMin, buildingSpawnRadius);
+        }
+
+        // ── Phase 2: Scatter remaining across entire map ─────────────────
+        int remainingTrees = Mathf.Max(0, totalTrees - spawnedTrees);
+        int remainingMines = Mathf.Max(0, totalMines - spawnedMines);
+        int remainingAnimals = Mathf.Max(0, totalAnimals - spawnedAnimals);
+
+        SpawnRandom(treePrefab, remainingTrees);
+        SpawnRandom(minePrefab, remainingMines);
+        SpawnRandom(animalPrefab, remainingAnimals);
+
+        // ── Report ───────────────────────────────────────────────────────
+        Debug.Log($"[ResourceSpawner] RESULTS — Spawned: {spawnedTrees}T/{spawnedMines}M/{spawnedAnimals}A | " +
+                  $"Failed: {failedTrees}T/{failedMines}M/{failedAnimals}A | Total: {placedPositions.Count}");
+
+        // Verify distance from first building
+        if (buildingPositions.Count > 0 && placedPositions.Count > 0)
+        {
+            float nearestDist = float.MaxValue;
+            foreach (var pos in placedPositions)
+            {
+                float d = Vector3.Distance(buildingPositions[0], pos);
+                if (d < nearestDist) nearestDist = d;
+            }
+            Debug.Log($"[ResourceSpawner] Nearest resource to first building: {nearestDist:F1} units");
+        }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-
-    private void SpawnCluster(GameObject prefab, int count,
-        Vector3 center, float maxRadius, float minRadius)
+    private void SpawnNearPoint(GameObject prefab, int count, Vector3 center, Vector3 inwardDir, float minDist, float maxDist)
     {
-        if (prefab == null) return;
+        if (prefab == null || count <= 0) return;
+
         for (int i = 0; i < count; i++)
         {
-            Vector3? pos = FindValidPos(center, minRadius, maxRadius);
-            if (pos.HasValue)
-                Instantiate(prefab, pos.Value, Quaternion.Euler(0, Random.Range(0f, 360f), 0));
+            // Random in circle, biased inward toward center
+            Vector2 randCircle = Random.insideUnitCircle;
+            Vector3 offset = new Vector3(randCircle.x, 0, randCircle.y) * maxDist;
+
+            // Strong inward bias so resources are between building and center
+            float inwardBias = Random.Range(minDist, maxDist * 0.8f);
+            offset += inwardDir * inwardBias;
+
+            Vector3 candidate = center + offset;
+            candidate.x = Mathf.Clamp(candidate.x, -limit, limit);
+            candidate.z = Mathf.Clamp(candidate.z, -limit, limit);
+
+            if (!NavMesh.SamplePosition(candidate, out NavMeshHit hit, navMeshMaxDistance, NavMesh.AllAreas))
+            {
+                // Fallback: closer to center point
+                candidate = center + inwardDir * Random.Range(minDist, maxDist * 0.5f);
+                candidate.x = Mathf.Clamp(candidate.x, -limit, limit);
+                candidate.z = Mathf.Clamp(candidate.z, -limit, limit);
+                if (!NavMesh.SamplePosition(candidate, out hit, navMeshMaxDistance * 2f, NavMesh.AllAreas))
+                {
+                    IncrementCounter(prefab, false);
+                    continue;
+                }
+            }
+
+            Vector3 snapped = hit.position;
+            if (!ClearOfOtherNodes(snapped, minNodeSeparationSqr))
+            {
+                if (!ClearOfOtherNodes(snapped, minNodeSeparationSqr * 0.25f))
+                {
+                    IncrementCounter(prefab, false);
+                    continue;
+                }
+            }
+
+            Instantiate(prefab, snapped, Quaternion.Euler(0, Random.Range(0f, 360f), 0));
+            placedPositions.Add(snapped);
+            IncrementCounter(prefab, true);
         }
     }
 
     private void SpawnRandom(GameObject prefab, int count)
     {
-        if (prefab == null) return;
-        float limit = mapHalfSize - edgeMargin;
+        if (prefab == null || count <= 0) return;
+
         for (int i = 0; i < count; i++)
         {
             Vector3 center = new Vector3(
                 Random.Range(-limit, limit), 0,
                 Random.Range(-limit, limit));
-            Vector3? pos = FindValidPos(center, 0, 3f);
+
+            Vector3? pos = FindValidPos(center, 0, limit * 0.9f);
             if (pos.HasValue)
+            {
                 Instantiate(prefab, pos.Value, Quaternion.Euler(0, Random.Range(0f, 360f), 0));
+                placedPositions.Add(pos.Value);
+                IncrementCounter(prefab, true);
+            }
+            else
+            {
+                IncrementCounter(prefab, false);
+            }
         }
     }
 
-    /// <summary>
-    /// Tries up to 15 times to find a position that:
-    /// 1. Is on the NavMesh
-    /// 2. Is within the map
-    /// 3. Is at least minNodeSeparation away from every other resource node
-    /// </summary>
     private Vector3? FindValidPos(Vector3 center, float minDist, float maxDist)
     {
-        float limit = mapHalfSize - edgeMargin;
-
-        for (int attempt = 0; attempt < 15; attempt++)
+        for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
-            Vector2 rand   = Random.insideUnitCircle.normalized *
-                             Random.Range(Mathf.Max(0.5f, minDist), maxDist);
-            Vector3 cand   = center + new Vector3(rand.x, 0, rand.y);
+            float effectiveSepSqr = minNodeSeparationSqr;
+            if (attempt > 50) effectiveSepSqr = (minNodeSeparation * 0.5f) * (minNodeSeparation * 0.5f);
+            if (attempt > 80) effectiveSepSqr = 0f;
 
-            // Clamp to map
-            cand.x = Mathf.Clamp(cand.x, -limit, limit);
-            cand.z = Mathf.Clamp(cand.z, -limit, limit);
+            Vector2 rand = Random.insideUnitCircle;
+            if (rand.sqrMagnitude < 0.001f) rand = Vector2.right;
+            rand = rand.normalized * Random.Range(Mathf.Max(0.5f, minDist), maxDist);
+            Vector3 candidate = center + new Vector3(rand.x, 0, rand.y);
 
-            // Snap to NavMesh
-            if (!NavMesh.SamplePosition(cand, out NavMeshHit hit, 3f, NavMesh.AllAreas))
+            candidate.x = Mathf.Clamp(candidate.x, -limit, limit);
+            candidate.z = Mathf.Clamp(candidate.z, -limit, limit);
+
+            if (!NavMesh.SamplePosition(candidate, out NavMeshHit hit, navMeshMaxDistance, NavMesh.AllAreas))
                 continue;
 
             Vector3 snapped = hit.position;
-
-            // Check separation from existing nodes (fixes overlap Bug 4)
-            if (!ClearOfOtherNodes(snapped))
+            if (!ClearOfOtherNodes(snapped, effectiveSepSqr))
                 continue;
 
             return snapped;
@@ -121,14 +241,21 @@ public class ResourceSpawner : MonoBehaviour
         return null;
     }
 
-    /// <summary>Returns true if pos is far enough from every existing ResourceNode.</summary>
-    private bool ClearOfOtherNodes(Vector3 pos)
+    private bool ClearOfOtherNodes(Vector3 pos, float sqrSeparation)
     {
-        foreach (ResourceNode n in FindObjectsOfType<ResourceNode>())
+        if (sqrSeparation <= 0f) return true;
+        foreach (Vector3 p in placedPositions)
         {
-            if (Vector3.Distance(pos, n.transform.position) < minNodeSeparation)
+            if ((pos - p).sqrMagnitude < sqrSeparation)
                 return false;
         }
         return true;
+    }
+
+    private void IncrementCounter(GameObject prefab, bool success)
+    {
+        if (prefab == treePrefab) { if (success) spawnedTrees++; else failedTrees++; }
+        else if (prefab == minePrefab) { if (success) spawnedMines++; else failedMines++; }
+        else if (prefab == animalPrefab) { if (success) spawnedAnimals++; else failedAnimals++; }
     }
 }
