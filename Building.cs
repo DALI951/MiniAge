@@ -468,6 +468,15 @@ public class Building : NetworkBehaviour
 
     public string            BuildingName     => buildingName;
     public string BuildingDescription => buildingDescription;
+    public void SetSpawnablePrefabs(List<GameObject> prefabs, List<float> times, List<int> food, List<int> wood, List<int> gold)
+    {
+        spawnablePrefabs = prefabs;
+        unitTrainingTimes = times;
+        unitCostFood = food;
+        unitCostWood = wood;
+        unitCostGold = gold;
+    }
+
     public List<GameObject>  SpawnablePrefabs => spawnablePrefabs;
     public int               OwnerPlayerId    => ownerPlayerId;
     public int               CurrentBuildingHealth => currentBuildingHealth;
