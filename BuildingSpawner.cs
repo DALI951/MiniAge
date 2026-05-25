@@ -8,11 +8,6 @@ public class BuildingSpawner : MonoBehaviour
     [SerializeField] private GameObject homeSitePrefab;
     [SerializeField] private GameObject barracksPrefab;
 
-    [Header("Unit Prefabs")]
-    [SerializeField] private GameObject villagerPrefab;
-    [SerializeField] private GameObject infantryPrefab;
-    [SerializeField] private GameObject cavalryPrefab;
-
     [Header("Offsets from spawn point")]
     [SerializeField] private float homeSiteOffset = -8f;
     [SerializeField] private float barracksOffset =  8f;
@@ -116,50 +111,7 @@ public class BuildingSpawner : MonoBehaviour
         if (go.GetComponentInChildren<Collider>() == null)
         { BoxCollider bc = go.AddComponent<BoxCollider>(); bc.size = new Vector3(2f, 2f, 2f); }
         if (go.TryGetComponent(out Building building))
-        {
             building.SetOwner(ownerIndex);
-            SetupBuildingPrefabs(building);
-        }
-    }
-
-    private void SetupBuildingPrefabs(Building building)
-    {
-        if (building is HomeSite && villagerPrefab != null)
-        {
-            building.SetSpawnablePrefabs(
-                new List<GameObject> { villagerPrefab },
-                new List<float> { 10f },
-                new List<int> { 50 },
-                new List<int> { 0 },
-                new List<int> { 0 });
-        }
-        else if (building is Barracks)
-        {
-            var prefabs = new List<GameObject>();
-            var times = new List<float>();
-            var food = new List<int>();
-            var wood = new List<int>();
-            var gold = new List<int>();
-
-            if (infantryPrefab != null)
-            {
-                prefabs.Add(infantryPrefab);
-                times.Add(15f);
-                food.Add(50);
-                wood.Add(20);
-                gold.Add(0);
-            }
-            if (cavalryPrefab != null)
-            {
-                prefabs.Add(cavalryPrefab);
-                times.Add(25f);
-                food.Add(60);
-                wood.Add(30);
-                gold.Add(20);
-            }
-
-            building.SetSpawnablePrefabs(prefabs, times, food, wood, gold);
-        }
     }
 
     private void SpawnBuilding(GameObject prefab, Vector3 pos, Quaternion rot, int layer, int ownerIndex, NetworkConnectionToClient conn)
@@ -177,10 +129,7 @@ public class BuildingSpawner : MonoBehaviour
         if (go.GetComponentInChildren<Collider>() == null)
         { BoxCollider bc = go.AddComponent<BoxCollider>(); bc.size = new Vector3(2f, 2f, 2f); }
         if (go.TryGetComponent(out Building building))
-        {
             building.SetOwner(ownerIndex);
-            SetupBuildingPrefabs(building);
-        }
         NetworkServer.Spawn(go, conn);
     }
 
